@@ -982,6 +982,7 @@ $("dbView").addEventListener("click", (e) => {
   if (chip && dbState.expanded) loadBars(dbState.expanded.ticker, chip.dataset.barsPeriod);
 });
 
+$("brand").addEventListener("click", () => { location.hash = ""; });
 $("dbBtn").addEventListener("click", () => { location.hash = "#/db"; });
 $("btBtn").addEventListener("click", () => { location.hash = "#/backtest"; });
 $("devBtn").addEventListener("click", () => { location.hash = "#/deviations"; });
