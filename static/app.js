@@ -29,9 +29,24 @@ function loadCols() {
   return {};
 }
 
+function loadFilters() {
+  // [{key, op: "gte"|"lte", value}] — numeric threshold filters for the All view.
+  try {
+    const saved = JSON.parse(localStorage.getItem("mt.filters") || "null");
+    if (Array.isArray(saved)) {
+      return saved.filter((f) => f && typeof f.key === "string" &&
+        (f.op === "gte" || f.op === "lte") &&
+        typeof f.value === "number" && isFinite(f.value));
+    }
+  } catch { /* corrupted storage — start fresh */ }
+  return [];
+}
+
 const state = {
   period: localStorage.getItem("mt.period") || "3M",
+  grouping: localStorage.getItem("mt.grouping") === "all" ? "all" : "sector",
   cols: loadCols(),
+  filters: loadFilters(),
   collapsed: new Set(JSON.parse(localStorage.getItem("mt.collapsed") || "[]")),
   sort: { key: "ticker", dir: 1 },
   data: null,
@@ -46,6 +61,10 @@ if (!PERIODS.includes(state.period)) state.period = "3M";
 // Optional ?period=1D in the URL overrides the saved selection (bookmarkable views).
 const urlPeriod = (new URLSearchParams(location.search).get("period") || "").toUpperCase();
 if (PERIODS.includes(urlPeriod)) state.period = urlPeriod;
+
+// Optional ?group=all|sector overrides the saved grouping the same way.
+const urlGroup = (new URLSearchParams(location.search).get("group") || "").toLowerCase();
+if (urlGroup === "all" || urlGroup === "sector") state.grouping = urlGroup;
 
 const $ = (id) => document.getElementById(id);
 const tableWrap = document.querySelector(".table-wrap");
@@ -155,10 +174,14 @@ function renderSummary() {
       .join("");
 }
 
-function visibleColumns() {
+function columnUniverse() {
+  // Every column that can exist for the current period, ignoring visibility.
+  // Filters resolve against this so they keep working when a column is
+  // toggled off in the picker.
   const L = PERIOD_LABELS[state.period];
   const core = [
     { key: "ticker", label: "Stock", group: "", type: "stock" },
+    { key: "sector", label: "Sector", group: "", type: "sector", allOnly: true },
     { key: "market_cap", label: "Mkt Cap", group: "Price", type: "mcap",
       title: "Live price × cached shares outstanding (re-synced when you open the stock's detail view)" },
     { key: "current", label: "Current", group: "Price", type: "price" },
@@ -171,18 +194,81 @@ function visibleColumns() {
     { key: "low_pct", label: "Off Low", group: "perf", type: "pct",
       title: "Current price vs the period low" },
   ];
-  const extras = (state.data.metric_defs || [])
-    .filter(colVisible)
-    .map((m) => ({
-      key: "m:" + m.key, label: m.label, group: "Things to Track",
-      type: m.fmt, metric: m.key, title: m.description,
-    }));
+  const extras = (state.data.metric_defs || []).map((m) => ({
+    key: "m:" + m.key, label: m.label, group: "Things to Track",
+    type: m.fmt, metric: m.key, title: m.description, def: m,
+  }));
   return [...core, ...extras];
+}
+
+function visibleColumns() {
+  return columnUniverse().filter((c) =>
+    (!c.allOnly || state.grouping === "all") && (!c.def || colVisible(c.def)));
 }
 
 function cellValue(row, col) {
   if (row.error) return null;
   return col.metric ? row.metrics?.[col.metric] : row[col.key];
+}
+
+/* ---------- numeric filters (All view) ---------- */
+
+const FILTERABLE_TYPES = new Set(["mcap", "price", "pct", "pct_abs", "int"]);
+
+// "10B", "$500m", "-2.5", "3,000" → number; null if unparseable.
+function parseNumInput(s) {
+  const m = String(s).trim().replace(/[$,%\s]/g, "").match(/^(-?\d*\.?\d+)([kmbt])?$/i);
+  if (!m) return null;
+  const mult = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[(m[2] || "").toLowerCase()] || 1;
+  return Number(m[1]) * mult;
+}
+
+function filterableColumns() {
+  return columnUniverse().filter((c) => FILTERABLE_TYPES.has(c.type));
+}
+
+function saveFilters() {
+  localStorage.setItem("mt.filters", JSON.stringify(state.filters));
+}
+
+function applyFilters(rows) {
+  if (!state.filters.length) return rows;
+  const defs = Object.fromEntries(filterableColumns().map((c) => [c.key, c]));
+  return rows.filter((r) => state.filters.every((f) => {
+    const def = defs[f.key];
+    if (!def) return true; // metric no longer exists — ignore; chip stays removable
+    const v = cellValue(r, def);
+    if (typeof v !== "number" || !isFinite(v)) return false;
+    return f.op === "gte" ? v >= f.value : v <= f.value;
+  }));
+}
+
+function fmtFilterValue(f, def) {
+  if (def?.type === "mcap") return "$" + fmtBig(f.value);
+  if (def?.type === "price") return fmtPrice(f.value);
+  if (def?.type === "pct" || def?.type === "pct_abs") return `${f.value}%`;
+  return String(f.value);
+}
+
+function renderFilterChips(total, shown) {
+  const inAll = state.grouping === "all";
+  $("filterWrap").classList.toggle("hidden", !inAll);
+  const wrap = $("filterChips");
+  if (!inAll || !state.filters.length) {
+    wrap.classList.add("hidden");
+    wrap.innerHTML = "";
+    return;
+  }
+  const defs = Object.fromEntries(filterableColumns().map((c) => [c.key, c]));
+  const chips = state.filters.map((f, i) => {
+    const def = defs[f.key];
+    return `<span class="fchip">${escapeHtml(def ? def.label : f.key)}
+      ${f.op === "gte" ? "≥" : "≤"} ${escapeHtml(fmtFilterValue(f, def))}
+      <button class="fchip-x" data-fdel="${i}" title="Remove filter">✕</button></span>`;
+  }).join("");
+  wrap.innerHTML = chips +
+    `<span class="fcount">showing ${shown} of ${total} stock${total === 1 ? "" : "s"}</span>`;
+  wrap.classList.remove("hidden");
 }
 
 function renderTable() {
@@ -212,6 +298,18 @@ function renderTable() {
     `<tr class="group-row">${groupRow}</tr><tr class="col-row">${colRow}</tr>`;
 
   const tbody = document.querySelector("#grid tbody");
+
+  if (state.grouping === "all") {
+    // Flat cross-sector list: filter, then rank the whole portfolio.
+    const all = state.data.sectors.flatMap((sec) =>
+      sec.stocks.map((r) => ({ ...r, sector: sec.name })));
+    const rows = sortRows(applyFilters(all), cols);
+    tbody.innerHTML = rows.map((r) => stockRow(r, cols)).join("");
+    renderFilterChips(all.length, rows.length);
+    return;
+  }
+
+  renderFilterChips();
   tbody.innerHTML = state.data.sectors.map((sec) => {
     const collapsed = state.collapsed.has(sec.name);
     const delBtn = sec.stocks.length ? "" :
@@ -269,6 +367,9 @@ function stockRow(r, cols) {
 
   const cells = cols.slice(1).map((c) => {
     const v = cellValue(r, c);
+    if (c.type === "sector") {
+      return `<td class="cell-sector">${escapeHtml(r.sector || "")}</td>`;
+    }
     if (c.type === "mcap") {
       return `<td>${v == null ? '<span class="muted">—</span>' : "$" + fmtBig(v)}</td>`;
     }
@@ -318,10 +419,23 @@ document.querySelectorAll("#periodCtl button").forEach((btn) => {
   });
 });
 
+document.querySelectorAll("#groupCtl button").forEach((btn) => {
+  btn.classList.toggle("active", btn.dataset.group === state.grouping);
+  btn.addEventListener("click", () => {
+    state.grouping = btn.dataset.group;
+    localStorage.setItem("mt.grouping", state.grouping);
+    document.querySelectorAll("#groupCtl button").forEach((b) =>
+      b.classList.toggle("active", b === btn));
+    $("filterMenu").classList.add("hidden");
+    if (state.data) renderTable();
+  });
+});
+
 $("refreshBtn").addEventListener("click", () => load(true));
 
 $("colsBtn").addEventListener("click", (e) => {
   e.stopPropagation();
+  $("filterMenu").classList.add("hidden");
   $("colsMenu").classList.toggle("hidden");
 });
 $("colsMenu").addEventListener("click", (e) => e.stopPropagation());
@@ -332,7 +446,53 @@ $("colsMenu").addEventListener("change", (e) => {
   localStorage.setItem("mt.cols", JSON.stringify(state.cols));
   renderTable();
 });
-document.addEventListener("click", () => $("colsMenu").classList.add("hidden"));
+document.addEventListener("click", () => {
+  $("colsMenu").classList.add("hidden");
+  $("filterMenu").classList.add("hidden");
+});
+
+function renderFilterForm() {
+  // Offer the currently visible numeric columns (labels are period-aware).
+  $("fCol").innerHTML = visibleColumns()
+    .filter((c) => FILTERABLE_TYPES.has(c.type))
+    .map((c) => `<option value="${escapeHtml(c.key)}">${escapeHtml(c.label)}</option>`)
+    .join("");
+}
+
+$("filterBtn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  $("colsMenu").classList.add("hidden");
+  const menu = $("filterMenu");
+  if (menu.classList.contains("hidden")) renderFilterForm();
+  menu.classList.toggle("hidden");
+});
+$("filterMenu").addEventListener("click", (e) => e.stopPropagation());
+
+$("fAdd").addEventListener("click", () => {
+  const value = parseNumInput($("fVal").value);
+  if (value == null) {
+    $("fVal").classList.add("invalid");
+    $("fVal").focus();
+    return;
+  }
+  $("fVal").classList.remove("invalid");
+  state.filters.push({ key: $("fCol").value, op: $("fOp").value, value });
+  saveFilters();
+  $("fVal").value = "";
+  $("filterMenu").classList.add("hidden");
+  renderTable();
+});
+$("fVal").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("fAdd").click(); }
+});
+
+$("filterChips").addEventListener("click", (e) => {
+  const x = e.target.closest("button[data-fdel]");
+  if (!x) return;
+  state.filters.splice(Number(x.dataset.fdel), 1);
+  saveFilters();
+  renderTable();
+});
 
 document.querySelector("#grid thead").addEventListener("click", (e) => {
   const th = e.target.closest("th[data-sort]");

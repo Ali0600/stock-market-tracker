@@ -25,6 +25,12 @@ Requires Python 3.12 (Homebrew: `brew install python@3.12`).
 - **Sectors & stocks** live in SQLite (`data/tracker.db`). First run seeds a
   27-stock portfolio across 9 thematic sectors. Add/move/remove stocks from the
   UI — tickers are validated against Yahoo before they're saved.
+- **Sectors | All toggle**: keep the table grouped by sector, or flatten the
+  whole portfolio into one cross-sector table — sort by any column (e.g. rank
+  everything by market cap) and stack numeric threshold filters
+  (`Mkt Cap ≥ 10B`, `3M % ≤ 0`) with a live "showing X of Y" count. Grouping
+  and filters persist like the rest of the view state (`?group=all` works as a
+  URL override too).
 - **One batched fetch** per period pulls daily OHLC bars for *all* tracked tickers
   in a single `yf.download` call, behind a 10-minute in-memory TTL cache
   (5 minutes for intraday). The ⟳ Refresh button bypasses the cache.

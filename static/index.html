@@ -32,19 +32,46 @@
   <section id="summary" class="summary" aria-label="Sector summary"></section>
 
   <div class="toolbar">
-    <div class="segmented" id="periodCtl" role="tablist" aria-label="Period">
-      <button data-period="1D">1D</button>
-      <button data-period="5D">5D</button>
-      <button data-period="1M">1M</button>
-      <button data-period="3M">3M</button>
-      <button data-period="YTD">YTD</button>
-      <button data-period="1Y">1Y</button>
+    <div class="toolbar-side">
+      <div class="segmented" id="periodCtl" role="tablist" aria-label="Period">
+        <button data-period="1D">1D</button>
+        <button data-period="5D">5D</button>
+        <button data-period="1M">1M</button>
+        <button data-period="3M">3M</button>
+        <button data-period="YTD">YTD</button>
+        <button data-period="1Y">1Y</button>
+      </div>
+      <div class="segmented" id="groupCtl" role="tablist" aria-label="Grouping">
+        <button data-group="sector">Sectors</button>
+        <button data-group="all">All</button>
+      </div>
     </div>
-    <div class="colpicker">
-      <button id="colsBtn" class="btn">Things to Track ▾</button>
-      <div id="colsMenu" class="menu hidden"></div>
+    <div class="toolbar-side">
+      <div class="colpicker hidden" id="filterWrap">
+        <button id="filterBtn" class="btn">+ Filter ▾</button>
+        <div id="filterMenu" class="menu hidden">
+          <div class="menu-group">Add a filter</div>
+          <div class="filter-form">
+            <select id="fCol" aria-label="Column"></select>
+            <div class="filter-form-row">
+              <select id="fOp" aria-label="Comparison">
+                <option value="gte">≥</option>
+                <option value="lte">≤</option>
+              </select>
+              <input id="fVal" placeholder="e.g. 10B or -2.5" autocomplete="off" spellcheck="false">
+            </div>
+            <button id="fAdd" class="btn primary" type="button">Add filter</button>
+          </div>
+        </div>
+      </div>
+      <div class="colpicker">
+        <button id="colsBtn" class="btn">Things to Track ▾</button>
+        <div id="colsMenu" class="menu hidden"></div>
+      </div>
     </div>
   </div>
+
+  <div id="filterChips" class="filter-chips hidden" aria-label="Active filters"></div>
 
   <div class="table-wrap">
     <table id="grid">
