@@ -1,0 +1,12 @@
+# local runtime state — never public
+venv/
+.venv/
+data/
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+.env
+
+# Claude Code per-machine state (committed: launch.json, skills/)
+.claude/settings.local.json

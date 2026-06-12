@@ -1,0 +1,369 @@
+"""Stock Tracker — local market dashboard over yfinance."""
+from __future__ import annotations
+
+import re
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime
+from pathlib import Path
+from statistics import median
+from typing import Literal, Optional, Union
+
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
+from pandas import notna as pd_notna
+from pydantic import BaseModel, Field
+
+from . import backtest, db, metrics, prices, vault
+
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,12}$")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init()
+    yield
+
+
+app = FastAPI(title="Stock Tracker", lifespan=lifespan)
+
+
+class StockCreate(BaseModel):
+    ticker: str = Field(min_length=1, max_length=12)
+    sector_id: Optional[int] = None
+    new_sector_name: Optional[str] = Field(default=None, max_length=40)
+
+
+class StockMove(BaseModel):
+    sector_id: int
+
+
+class BacktestRule(BaseModel):
+    entry_mode: Literal["pct", "sigma"] = "pct"
+    entry_value: float = Field(2.0, gt=0, le=50)
+    avg_in_enabled: bool = False
+    avg_in_level: float = Field(4.0, gt=0, le=80)
+    tp_mode: Literal["pct", "avg_range"] = "pct"
+    tp_value: float = Field(3.0, gt=0, le=100)
+    stop_pct: float = Field(5.0, gt=0, le=90)
+    max_hold_days: int = Field(10, ge=1, le=120)
+    cost_bps: float = Field(5.0, ge=0, le=100)
+    lookback: int = Field(63, ge=20, le=200)
+
+
+class BacktestRequest(BaseModel):
+    tickers: Union[Literal["all"], list[str]] = "all"
+    rule: BacktestRule = BacktestRule()
+
+
+@app.get("/api/overview")
+def overview(period: str = "3M", refresh: bool = False):
+    ui_period = period.upper()
+    if ui_period not in prices.PERIODS:
+        raise HTTPException(422, f"period must be one of {', '.join(prices.PERIODS)}")
+
+    sectors = db.sectors_with_stocks()
+    tickers = [s["ticker"] for sec in sectors for s in sec["stocks"]]
+
+    frames: dict = {}
+    intraday: dict = {}
+    fetched_at, stale, fetch_error = time.time(), False, None
+    if tickers:
+        frames, fetched_at, stale, fetch_error = prices.get_daily(
+            tickers, ui_period, force=refresh)
+        intraday = prices.get_intraday(tickers, force=refresh)
+
+    out_sectors = []
+    for sec in sectors:
+        rows, pcts = [], []
+        for stock in sec["stocks"]:
+            base = {"id": stock["id"], "ticker": stock["ticker"], "name": stock["name"]}
+            frame = frames.get(stock["ticker"])
+            if frame is None or frame.empty:
+                rows.append({**base, "error": fetch_error or "No price data (delisted?)",
+                             "metrics": {}})
+                continue
+            core, window, perf = prices.compute_core(frame, ui_period,
+                                                     intraday.get(stock["ticker"]))
+            extras = metrics.compute_all(window, intraday.get(stock["ticker"]), perf)
+            shares = stock.get("shares")
+            market_cap = (round(shares * core["current"])
+                          if shares and core["current"] else None)
+            row = {**base, **core, "market_cap": market_cap,
+                   "metrics": extras, "error": None}
+            if row["pct"] is not None:
+                pcts.append(row["pct"])
+            rows.append(row)
+        out_sectors.append({
+            "id": sec["id"],
+            "name": sec["name"],
+            "avg_pct": round(sum(pcts) / len(pcts), 2) if pcts else None,
+            "stocks": rows,
+        })
+
+    return {
+        "period": ui_period,
+        "as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
+        "stale": stale,
+        "fetch_error": fetch_error,
+        "metric_defs": metrics.metric_defs(),
+        "sectors": out_sectors,
+    }
+
+
+@app.get("/api/stocks/{ticker}/detail")
+def stock_detail(ticker: str, period: str = "3M", refresh: bool = False):
+    ui_period = period.upper()
+    if ui_period not in prices.PERIODS:
+        raise HTTPException(422, f"period must be one of {', '.join(prices.PERIODS)}")
+    symbol = ticker.strip().upper()
+    stock = db.get_stock_by_ticker(symbol)
+    if not stock:
+        raise HTTPException(404, f"{symbol} is not tracked")
+
+    tickers = db.all_tickers()
+    frames, _, stale, fetch_error = prices.get_daily(tickers, "1Y", force=refresh)
+    intraday = prices.get_intraday(tickers, force=refresh)
+    chart, current, day_pct = prices.detail_series(
+        frames.get(symbol), intraday.get(symbol))
+
+    # Daily range statistics over the requested period window.
+    range_block = None
+    period_frames, _, _, _ = prices.get_daily(tickers, ui_period, force=refresh)
+    period_frame = period_frames.get(symbol)
+    if period_frame is not None and not period_frame.empty:
+        merged = prices._with_live_bar(period_frame, intraday.get(symbol))
+        window, perf, _ = prices.period_window(merged, ui_period)
+        window_stats = metrics.range_stats(window, perf)
+        if window_stats:
+            range_block = {
+                "period": ui_period,
+                "metrics": [{"key": key, "label": label, **window_stats[key]}
+                            for key, label, _, _ in metrics.DAILY_RANGE_METRICS
+                            if window_stats.get(key)],
+            }
+
+    stats = prices.get_stats(symbol, force=refresh)
+    if stats and current:
+        # Opportunistically re-sync cached shares so the overview's market cap
+        # tracks splits/dilution for stocks the user actually looks at.
+        db.set_shares(symbol, prices.effective_shares(
+            stats.get("market_cap"), current, None))
+
+    note = vault.stock_note(symbol)
+    vault_articles = [
+        {**article,
+         "change_pct": (prices._pct(current, article["price_at"])
+                        if current and article["price_at"] else None)}
+        for article in vault.articles_for(symbol)
+    ]
+    vault_block = (
+        {"note_md": note["note_md"] if note else None,
+         "updated": note["updated"] if note else None,
+         "articles": vault_articles}
+        if note or vault_articles else None
+    )
+
+    return {
+        "ticker": symbol,
+        "name": stock["name"],
+        "sector": stock["sector"],
+        "current": prices._round_price(current) if current is not None else None,
+        "day_pct": day_pct,
+        "stale": stale,
+        "fetch_error": fetch_error,
+        "chart": chart,
+        "stats": stats,
+        "range": range_block,
+        "news": prices.get_news(symbol, force=refresh),
+        "vault": vault_block,
+        "analysis_md": stock["analysis"],
+        "analysis_at": stock["analysis_at"],
+    }
+
+
+@app.post("/api/stocks", status_code=201)
+def add_stock(body: StockCreate):
+    ticker = body.ticker.strip().upper()
+    if not TICKER_RE.match(ticker):
+        raise HTTPException(422, "Ticker may only contain letters, digits, '.' and '-'")
+    if db.ticker_exists(ticker):
+        raise HTTPException(409, f"{ticker} is already tracked")
+
+    sector_name = (body.new_sector_name or "").strip()
+    if not sector_name and (body.sector_id is None or not db.sector_exists(body.sector_id)):
+        raise HTTPException(422, "Pick an existing sector or name a new one")
+
+    # Validate the ticker before touching the database so a failed add
+    # doesn't leave an orphan empty sector behind.
+    try:
+        name, shares = prices.validate_ticker(ticker)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+    sector_id = db.get_or_create_sector(sector_name) if sector_name else body.sector_id
+    stock_id = db.add_stock(ticker, name, sector_id)
+    db.set_shares(ticker, shares)
+    return {"id": stock_id, "ticker": ticker, "name": name, "sector_id": sector_id}
+
+
+@app.patch("/api/stocks/{stock_id}")
+def move_stock(stock_id: int, body: StockMove):
+    if not db.sector_exists(body.sector_id):
+        raise HTTPException(404, "Sector not found")
+    if not db.move_stock(stock_id, body.sector_id):
+        raise HTTPException(404, "Stock not found")
+    return {"ok": True}
+
+
+@app.delete("/api/stocks/{stock_id}", status_code=204)
+def remove_stock(stock_id: int):
+    if not db.delete_stock(stock_id):
+        raise HTTPException(404, "Stock not found")
+
+
+@app.get("/api/db")
+def db_view():
+    tables = db.dump_tables()
+    # Full analyses are heavy and already visible in the detail view — the DB
+    # view gets a preview plus the length.
+    for row in tables["stocks"]["rows"]:
+        analysis = row.pop("analysis", None)
+        row["analysis_chars"] = len(analysis) if analysis else 0
+        row["analysis_preview"] = ((analysis[:80] + "…")
+                                   if analysis and len(analysis) > 80 else analysis)
+    cols = [c for c in tables["stocks"]["columns"] if c != "analysis"]
+    tables["stocks"]["columns"] = cols + ["analysis_chars", "analysis_preview"]
+
+    try:
+        size_bytes = db.DB_PATH.stat().st_size
+    except OSError:
+        size_bytes = None
+    return {
+        "db": {"path": str(db.DB_PATH), "size_bytes": size_bytes},
+        "tables": tables,
+        "caches": prices.cache_status(),
+        "vault": vault.status(),
+    }
+
+
+@app.get("/api/db/prices/{ticker}")
+def db_prices(ticker: str, period: str = "3M"):
+    ui_period = period.upper()
+    if ui_period not in prices.PERIODS:
+        raise HTTPException(422, f"period must be one of {', '.join(prices.PERIODS)}")
+    symbol = ticker.strip().upper()
+    if not db.ticker_exists(symbol):
+        raise HTTPException(404, f"{symbol} is not tracked")
+
+    frames, fetched_at, stale, fetch_error = prices.get_daily(db.all_tickers(), ui_period)
+    frame = frames.get(symbol)
+    rows = []
+    if frame is not None and not frame.empty:
+        for idx, bar in frame.iterrows():
+            rows.append({
+                "date": str(idx.date()),
+                "open": round(float(bar["Open"]), 4) if pd_notna(bar["Open"]) else None,
+                "high": round(float(bar["High"]), 4) if pd_notna(bar["High"]) else None,
+                "low": round(float(bar["Low"]), 4) if pd_notna(bar["Low"]) else None,
+                "close": round(float(bar["Close"]), 4) if pd_notna(bar["Close"]) else None,
+                "volume": int(bar["Volume"]) if pd_notna(bar.get("Volume")) else None,
+            })
+    return {"ticker": symbol, "period": ui_period, "stale": stale,
+            "fetch_error": fetch_error, "rows": rows}
+
+
+@app.post("/api/backtest")
+def run_backtest_api(body: BacktestRequest):
+    rule = body.rule
+    if (rule.avg_in_enabled and rule.entry_mode == "pct"
+            and rule.avg_in_level <= rule.entry_value):
+        raise HTTPException(422, "avg_in_level must be deeper than entry_value")
+
+    tracked = db.all_tickers()
+    if body.tickers == "all":
+        targets = tracked
+    else:
+        targets = [t.strip().upper() for t in body.tickers]
+        unknown = [t for t in targets if t not in tracked]
+        if unknown:
+            raise HTTPException(422, f"Not tracked: {', '.join(unknown)}")
+    if not targets:
+        raise HTTPException(422, "No tickers to test")
+
+    frames, _, stale, fetch_error = prices.get_daily(tracked, "1Y")
+    rule_dict = rule.model_dump()
+    results = {t: backtest.run_backtest(frames.get(t), rule_dict) for t in targets}
+
+    tested = {t: r for t, r in results.items() if "summary" in r}
+    expectancies = [r["summary"]["expectancy_pct"] for r in tested.values()
+                    if r["summary"]["expectancy_pct"] is not None]
+    cumulatives = [(t, r["summary"]["cumulative_pct"]) for t, r in tested.items()
+                   if r["summary"]["cumulative_pct"] is not None]
+    rollup = {
+        "tickers_tested": len(tested),
+        "tickers_skipped": len(results) - len(tested),
+        "total_trades": sum(r["summary"]["trades"] for r in tested.values()),
+        "median_expectancy_pct": round(median(expectancies), 2) if expectancies else None,
+        "mean_expectancy_pct": (round(sum(expectancies) / len(expectancies), 2)
+                                if expectancies else None),
+        "net_negative_tickers": sum(1 for _, c in cumulatives if c < 0),
+        "beat_buy_hold": sum(1 for t, c in cumulatives
+                             if c > (tested[t]["summary"]["buy_hold_pct"] or 0)),
+        "best": max(cumulatives, key=lambda x: x[1]) if cumulatives else None,
+        "worst": min(cumulatives, key=lambda x: x[1]) if cumulatives else None,
+    }
+    return {"rule": rule_dict, "stale": stale, "fetch_error": fetch_error,
+            "results": results, "rollup": rollup,
+            "assumptions": backtest.ASSUMPTIONS}
+
+
+@app.get("/api/deviations")
+def deviations():
+    tickers = db.all_tickers()
+    frames, fetched_at, stale, fetch_error = prices.get_daily(tickers, "1Y")
+    intraday = prices.get_intraday(tickers)
+    rows = []
+    for sec in db.sectors_with_stocks():
+        for stock in sec["stocks"]:
+            frame = frames.get(stock["ticker"])
+            if frame is None or frame.empty:
+                continue
+            merged = prices._with_live_bar(frame, intraday.get(stock["ticker"]))
+            dev = metrics.today_vs_typical(merged)
+            if dev:
+                rows.append({"ticker": stock["ticker"], "name": stock["name"],
+                             "sector": sec["name"], **dev})
+    return {"as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
+            "stale": stale, "fetch_error": fetch_error, "stocks": rows}
+
+
+@app.get("/api/sectors")
+def list_sectors():
+    return db.list_sectors()
+
+
+@app.get("/api/sectors/{sector_id}/note")
+def get_sector_note(sector_id: int):
+    sector = next((s for s in db.list_sectors() if s["id"] == sector_id), None)
+    if not sector:
+        raise HTTPException(404, "Sector not found")
+    note = vault.sector_note(sector["name"])
+    if not note:
+        raise HTTPException(404, f"No vault note for {sector['name']}")
+    return {"id": sector_id, "name": sector["name"],
+            "stock_count": sector["stock_count"], **note}
+
+
+@app.delete("/api/sectors/{sector_id}", status_code=204)
+def remove_sector(sector_id: int):
+    result = db.delete_sector(sector_id)
+    if result == "not_found":
+        raise HTTPException(404, "Sector not found")
+    if result == "not_empty":
+        raise HTTPException(409, "Sector still has stocks — remove them first")
+
+
+# Mounted last so /api/* routes take precedence; html=True serves index.html at /.
+app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")

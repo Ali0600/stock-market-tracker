@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Market Tracker</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='80' font-size='80'>📈</text></svg>">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">Market<span>Tracker</span></div>
+  <div class="topbar-meta">
+    <span id="asOf" class="as-of"></span>
+    <span id="staleBadge" class="badge stale hidden" title="Live fetch failed — showing last cached data">cached</span>
+  </div>
+  <div class="topbar-actions">
+    <button id="devBtn" class="btn" title="Today vs each stock's typical behavior (z-scores)">σ Today</button>
+    <button id="btBtn" class="btn" title="Historical rule simulation — descriptive only">⌁ Backtest</button>
+    <button id="dbBtn" class="btn" title="Read-only database view">⛁ Data</button>
+    <button id="refreshBtn" class="btn" title="Force refresh from Yahoo Finance">
+      <span class="refresh-icon">⟳</span> Refresh
+    </button>
+    <button id="addBtn" class="btn primary">+ Add Stock</button>
+  </div>
+</header>
+
+<div id="banner" class="banner hidden"></div>
+
+<main>
+  <section id="summary" class="summary" aria-label="Sector summary"></section>
+
+  <div class="toolbar">
+    <div class="segmented" id="periodCtl" role="tablist" aria-label="Period">
+      <button data-period="1D">1D</button>
+      <button data-period="5D">5D</button>
+      <button data-period="1M">1M</button>
+      <button data-period="3M">3M</button>
+      <button data-period="YTD">YTD</button>
+      <button data-period="1Y">1Y</button>
+    </div>
+    <div class="colpicker">
+      <button id="colsBtn" class="btn">Things to Track ▾</button>
+      <div id="colsMenu" class="menu hidden"></div>
+    </div>
+  </div>
+
+  <div class="table-wrap">
+    <table id="grid">
+      <thead></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div id="emptyState" class="empty hidden">
+    <p>Nothing tracked yet.</p>
+    <button class="btn primary" onclick="openAddModal()">+ Add your first stock</button>
+  </div>
+
+  <section id="dbView" class="db-view hidden" aria-label="Database view"></section>
+  <section id="btView" class="db-view hidden" aria-label="Backtest"></section>
+  <section id="devView" class="db-view hidden" aria-label="Deviations"></section>
+</main>
+
+<dialog id="addModal">
+  <form id="addForm" method="dialog">
+    <h2>Add Stock</h2>
+    <label>Ticker
+      <input id="addTicker" name="ticker" placeholder="e.g. AAPL" autocomplete="off"
+             spellcheck="false" maxlength="12" required>
+    </label>
+    <label>Sector
+      <select id="addSector" name="sector"></select>
+    </label>
+    <label id="newSectorRow" class="hidden">New sector name
+      <input id="addNewSector" name="newSector" placeholder="e.g. Semiconductors" maxlength="40">
+    </label>
+    <p id="addError" class="form-error hidden"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" onclick="addModal.close()">Cancel</button>
+      <button type="submit" id="addSubmit" class="btn primary">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="detailModal" class="detail-modal">
+  <div id="detailBody"></div>
+</dialog>
+
+<dialog id="moveModal">
+  <form id="moveForm" method="dialog">
+    <h2 id="moveTitle">Move stock</h2>
+    <label>Sector
+      <select id="moveSector"></select>
+    </label>
+    <p id="moveError" class="form-error hidden"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" onclick="moveModal.close()">Cancel</button>
+      <button type="submit" class="btn primary">Move</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/app.js"></script>
+</body>
+</html>
