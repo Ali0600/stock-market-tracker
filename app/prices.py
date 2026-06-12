@@ -245,18 +245,36 @@ def cache_status() -> list[dict]:
     return sorted(out, key=lambda entry: entry["slot"])
 
 
-def detail_series(df: Optional[pd.DataFrame],
-                  intraday: Optional[pd.DataFrame]) -> tuple[list, Optional[float], Optional[float]]:
-    """(chart points, current price, day %) for the detail view, with the live
-    intraday bar folded in like the overview table."""
+def current_and_day_pct(df: Optional[pd.DataFrame],
+                        intraday: Optional[pd.DataFrame]) -> tuple[Optional[float], Optional[float]]:
+    """(current price, day %) with the live intraday bar folded in, independent
+    of whatever chart window the detail view is showing."""
     if df is None or df.empty:
-        return [], None, None
-    merged = _with_live_bar(df, intraday)
-    closes = merged["Close"].dropna()
-    chart = [[str(idx.date()), round(float(v), 4)] for idx, v in closes.items()]
+        return None, None
+    closes = _with_live_bar(df, intraday)["Close"].dropna()
     current = float(closes.iloc[-1]) if len(closes) else None
     day_pct = _pct(current, float(closes.iloc[-2])) if len(closes) >= 2 else None
-    return chart, current, day_pct
+    return current, day_pct
+
+
+def chart_series(df: Optional[pd.DataFrame], intraday: Optional[pd.DataFrame],
+                 ui_period: str) -> list:
+    """Chart points for the detail view, scoped to the UI period. 1D renders
+    the live session's 1-minute line (time labels); other periods slice the
+    daily closes through the same window logic as the table and matrix."""
+    if ui_period == "1D" and intraday is not None and not intraday.empty:
+        closes = intraday["Close"].dropna()
+        if len(closes) >= 2:
+            return [[f"{idx:%H:%M}", round(float(v), 4)] for idx, v in closes.items()]
+    if df is None or df.empty:
+        return []
+    merged = _with_live_bar(df, intraday)
+    if ui_period == "1D":
+        window = merged.tail(2)  # no intraday available — prev close + latest
+    else:
+        window, _, _ = period_window(merged, ui_period)
+    closes = window["Close"].dropna()
+    return [[str(idx.date()), round(float(v), 4)] for idx, v in closes.items()]
 
 
 def get_stats(ticker: str, force: bool = False) -> Optional[dict]:

@@ -125,13 +125,14 @@ def stock_detail(ticker: str, period: str = "3M", refresh: bool = False):
     tickers = db.all_tickers()
     frames, _, stale, fetch_error = prices.get_daily(tickers, "1Y", force=refresh)
     intraday = prices.get_intraday(tickers, force=refresh)
-    chart, current, day_pct = prices.detail_series(
+    current, day_pct = prices.current_and_day_pct(
         frames.get(symbol), intraday.get(symbol))
 
-    # Daily range statistics over the requested period window.
+    # Chart and range statistics both follow the requested period window.
     range_block = None
     period_frames, _, _, _ = prices.get_daily(tickers, ui_period, force=refresh)
     period_frame = period_frames.get(symbol)
+    chart = prices.chart_series(period_frame, intraday.get(symbol), ui_period)
     if period_frame is not None and not period_frame.empty:
         merged = prices._with_live_bar(period_frame, intraday.get(symbol))
         window, perf, _ = prices.period_window(merged, ui_period)

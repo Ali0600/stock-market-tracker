@@ -479,6 +479,7 @@ $("moveForm").addEventListener("submit", async (e) => {
 const detailModal = $("detailModal");
 let detailOpenedFromApp = false;
 let detailTicker = null;
+let detailPeriod = null; // overlay-local timeframe; never touches the dashboard's
 
 function fmtBig(v) {
   if (v == null || !isFinite(v)) return "—";
@@ -544,7 +545,7 @@ function chartSVG(points) {
   const trend = vals[vals.length - 1] >= vals[0] ? "up" : "down";
   return `
     <svg viewBox="0 0 ${W} ${H}" class="chart ${trend}" preserveAspectRatio="none" role="img"
-         aria-label="1 year price chart">
+         aria-label="price chart for the selected timeframe">
       <path class="chart-area" d="${area}"/>
       <path class="chart-line" d="${line}"/>
     </svg>
@@ -645,19 +646,24 @@ function newsList(items) {
     </section>`;
 }
 
-async function openDetail(ticker) {
+async function openDetail(ticker, period) {
+  const freshOpen = detailTicker !== ticker || !detailModal.open;
   detailTicker = ticker;
-  $("detailBody").innerHTML = `
-    <div class="detail-head">
-      <div><span class="detail-tick">${escapeHtml(ticker)}</span></div>
-      <button class="iconbtn detail-close" onclick="detailModal.close()" title="Close">✕</button>
-    </div>
-    <p class="muted">Loading…</p>`;
+  detailPeriod = period || (freshOpen ? state.period : detailPeriod) || state.period;
+  const requested = `${ticker}:${detailPeriod}`;
+  if (freshOpen) {
+    $("detailBody").innerHTML = `
+      <div class="detail-head">
+        <div><span class="detail-tick">${escapeHtml(ticker)}</span></div>
+        <button class="iconbtn detail-close" onclick="detailModal.close()" title="Close">✕</button>
+      </div>
+      <p class="muted">Loading…</p>`;
+  }
   if (!detailModal.open) detailModal.showModal();
 
   let d;
   try {
-    const res = await fetch(`/api/stocks/${ticker}/detail?period=${state.period}`);
+    const res = await fetch(`/api/stocks/${ticker}/detail?period=${detailPeriod}`);
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
     d = await res.json();
   } catch (err) {
@@ -669,7 +675,8 @@ async function openDetail(ticker) {
       <p class="form-error">${escapeHtml(err.message)}</p>`;
     return;
   }
-  if (detailTicker !== ticker || !detailModal.open) return; // user moved on
+  // user moved on (closed, other ticker, or clicked another timeframe chip)
+  if (`${detailTicker}:${detailPeriod}` !== requested || !detailModal.open) return;
 
   const analysis = d.analysis_md
     ? `${renderMarkdown(d.analysis_md)}
@@ -690,6 +697,9 @@ async function openDetail(ticker) {
         ${d.stale ? '<span class="badge stale">cached</span>' : ""}
       </div>
       <button class="iconbtn detail-close" onclick="detailModal.close()" title="Close">✕</button>
+    </div>
+    <div class="detail-periods">${PERIODS.map((p) =>
+      `<button class="chip ${p === detailPeriod ? "active" : ""}" data-detail-period="${p}">${p}</button>`).join("")}
     </div>
     <section class="detail-section">${chartSVG(d.chart)}</section>
     <section class="detail-section"><h3>Key Stats</h3>${statsGrid(d.stats)}</section>
@@ -1172,11 +1182,13 @@ const DEV_COLS = [
 
 function zChip(metric) {
   if (!metric) return '<span class="muted">—</span>';
-  const z = metric.z;
-  const cls = z > 0.05 ? "up" : z < -0.05 ? "down" : "flat";
-  const hot = Math.abs(z) >= 2 ? " z-hot" : "";
-  const title = `today ${metric.today > 0 ? "+" : ""}${metric.today}% vs avg ${metric.avg}% ± ${metric.sigma}`;
-  return `<span class="pct ${cls}${hot}" title="${escapeHtml(title)}">${z > 0 ? "+" : ""}${z.toFixed(1)}σ</span>`;
+  const v = metric.today;
+  const cls = v > 0.005 ? "up" : v < -0.005 ? "down" : "flat";
+  const hot = Math.abs(metric.z) >= 2 ? " z-hot" : "";
+  const zText = `${metric.z > 0 ? "+" : ""}${metric.z.toFixed(1)}σ`;
+  const title = `${zText} vs its typical day (avg ${metric.avg}% ± ${metric.sigma})`;
+  return `<span class="pct ${cls}${hot}" title="${escapeHtml(title)}">` +
+         `${v > 0 ? "+" : ""}${v.toFixed(2)}%<small class="z-tag">${zText}</small></span>`;
 }
 
 async function enterDevView() {
@@ -1197,9 +1209,9 @@ function renderDevView() {
   const d = devState.data;
   const session = d.stocks.length ? d.stocks[0].session_date : "";
   const sorted = [...d.stocks].sort((a, b) => {
-    const za = a.metrics[devState.sort] ? Math.abs(a.metrics[devState.sort].z) : -1;
-    const zb = b.metrics[devState.sort] ? Math.abs(b.metrics[devState.sort].z) : -1;
-    return zb - za;
+    const va = a.metrics[devState.sort] ? Math.abs(a.metrics[devState.sort].today) : -1;
+    const vb = b.metrics[devState.sort] ? Math.abs(b.metrics[devState.sort].today) : -1;
+    return vb - va;
   });
   const head = DEV_COLS.map(([key, label]) =>
     `<th class="sortable" data-dev-sort="${key}">${label}
@@ -1217,14 +1229,14 @@ function renderDevView() {
       <h2>σ Today <span class="muted">· session ${escapeHtml(session)}${d.stale ? " · cached" : ""}</span></h2>
       <button class="btn" id="devBack" style="margin-left:auto">← Dashboard</button>
     </div>
-    <p class="muted dev-note">How unusual is today for each stock, measured against its own
-      trailing 63-day distribution. ±2σ or more is highlighted. Statistical context only —
-      it describes the day; it doesn't prescribe anything.</p>
+    <p class="muted dev-note">Today's moves in %, each tagged with how unusual it is for that
+      stock (the small σ = distance from its own trailing 63-day average; ±2σ or more lights
+      up). Statistical context only — it describes the day; it doesn't prescribe anything.</p>
     <div class="db-scroll"><table class="db-table dev-table">
       <thead><tr><th>stock</th><th>current</th>${head}</tr></thead>
       <tbody>${rows}</tbody></table></div>
-    <p class="analysis-meta">z = (today − trailing avg) / trailing σ, computed per stock from the
-      63 sessions before today. Hover a chip for the raw numbers.</p>`;
+    <p class="analysis-meta">σ tag = (today − trailing avg) / trailing σ, computed per stock from
+      the 63 sessions before today. Hover a chip for the averages behind it.</p>`;
   $("devBack").addEventListener("click", () => { location.hash = ""; });
 }
 
@@ -1289,6 +1301,11 @@ detailModal.addEventListener("close", () => {
   detailOpenedFromApp = false;
 });
 detailModal.addEventListener("click", (e) => {
+  const chip = e.target.closest("button[data-detail-period]");
+  if (chip && detailTicker) {
+    openDetail(detailTicker, chip.dataset.detailPeriod);
+    return;
+  }
   if (e.target === detailModal) detailModal.close(); // backdrop click
 });
 

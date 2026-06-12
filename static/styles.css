@@ -387,6 +387,8 @@ dialog.detail-modal {
 .detail-current { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .detail-close { visibility: visible; font-size: 16px; align-self: flex-start; }
 
+.detail-periods { display: flex; gap: 4px; margin: -4px 0 12px; }
+
 .detail-section { margin-bottom: 20px; }
 .detail-section h3 {
   margin: 0 0 10px;
@@ -680,6 +682,7 @@ tr.bt-skip td { opacity: 0.55; }
 .dev-table .tick-name { font-size: 10px; }
 .pct.z-hot.up { background: rgba(52, 211, 153, 0.25); box-shadow: 0 0 0 1px var(--green) inset; }
 .pct.z-hot.down { background: rgba(248, 113, 113, 0.25); box-shadow: 0 0 0 1px var(--red) inset; }
+.pct .z-tag { margin-left: 5px; font-size: 9.5px; font-weight: 500; opacity: 0.65; }
 
 /* ---------- misc ---------- */
 

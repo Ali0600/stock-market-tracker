@@ -51,10 +51,13 @@ Percentages: `%` = current vs ago · `Off High` = current vs period high (≤ 0)
 ## Stock detail view & AI analysis
 
 Click any ticker to open its detail panel (`#/stock/NVDA` — bookmarkable):
-a 1-year SVG price chart, a fundamentals grid (valuation, margins, 52-week
-range, analyst consensus and mean target, earnings date), recent headlines,
-and an **AI Analysis** — a stored research note covering what the company
-does, real performance numbers, strengths, risks, and what to watch.
+an SVG price chart with its own timeframe selector (1D shows the live
+1-minute intraday line; 5D–1Y slice the daily closes), a fundamentals grid
+(valuation, margins, 52-week range, analyst consensus and mean target,
+earnings date), the daily-range statistics matrix for the selected timeframe,
+recent headlines, and an **AI Analysis** — a stored research note covering
+what the company does, real performance numbers, strengths, risks, and what
+to watch.
 
 Analyses live in SQLite (`stocks.analysis`) and are written/refreshed by
 [`scripts/seed_analyses.py`](scripts/seed_analyses.py), which also reports any
