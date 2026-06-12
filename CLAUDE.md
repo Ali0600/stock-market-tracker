@@ -18,5 +18,12 @@
 - `scripts/create_llm_wiki.py` = standalone generic scaffolder for Karpathy-style vaults on any topic (`--from-tracker` reproduces the Stocks Vault; `--export-config` makes it portable). Read-only DB view lives at `#/db` (`GET /api/db`, `GET /api/db/prices/{ticker}`).
 - **Regeneration contract**: when refreshing the SQLite AI analyses, first read the stock's vault note and ground the synthesis in its Facts/Speculations; append a `log.md` line. Vault = knowledge base, DB = rendered synthesis.
 
+## Analysis tools & boundaries
+- `app/backtest.py` (`POST /api/backtest`, `#/backtest`) and `GET /api/deviations` (`#/deviations`) are **descriptive-only by explicit agreement with the owner**: never add buy/sell/hold output, signal language, position-sizing advice, or auto-firing alerts anywhere in the app or vault. The tools compute; the owner decides.
+- Backtest honesty invariants to preserve when touching the engine: trailing stats shifted one day (no look-ahead), limit fills require the day's range to reach the price, gaps fill at the open, same-day stop-before-target, no entry-day take-profit, costs on by default, buy-&-hold benchmark always shown. Engine changes must keep the hand-computed fixture tests passing (currently a scratch file in /tmp — moving them into the repo is on the backlog).
+
+## Workflow
+- Commit each verified change as you go (owner preference). Descriptive messages, author = owner only — never a Claude co-author trailer. The repo is destined for public GitHub: run the leak check (no `data/`, `venv/`, `.claude/settings.local.json`, secrets, or absolute personal paths) before commits that add files.
+
 ## Verifying UI changes
 - The Claude Preview panel cannot start servers from this folder (see global CLAUDE.md → machine notes). Run the server with Bash and screenshot with headless Chrome instead.
