@@ -13,41 +13,18 @@ const PERIOD_LABELS = {
   "1Y": { ago: "1Y Ago", pct: "1Y %", high: "1Y High", low: "1Y Low" },
 };
 
-function loadCols() {
-  // {key: bool}; keys not present fall back to each column def's default_on.
-  try {
-    const saved = JSON.parse(localStorage.getItem("mt.cols") || "null");
-    if (saved && typeof saved === "object" && !Array.isArray(saved)) return saved;
-    // Migrate the legacy hidden-keys list (old default-on model).
-    const legacy = JSON.parse(localStorage.getItem("mt.hiddenCols") || "null");
-    if (Array.isArray(legacy)) {
-      const map = {};
-      legacy.forEach((k) => { map[k] = false; });
-      return map;
-    }
-  } catch { /* corrupted storage — start fresh */ }
-  return {};
-}
-
-function loadFilters() {
-  // [{key, op: "gte"|"lte", value}] — numeric threshold filters for the All view.
-  try {
-    const saved = JSON.parse(localStorage.getItem("mt.filters") || "null");
-    if (Array.isArray(saved)) {
-      return saved.filter((f) => f && typeof f.key === "string" &&
-        (f.op === "gte" || f.op === "lte") &&
-        typeof f.value === "number" && isFinite(f.value));
-    }
-  } catch { /* corrupted storage — start fresh */ }
-  return [];
-}
+// Storage reader handed to the lib.js loaders (they stay DOM-free/testable).
+// Also survives a browser that blocks localStorage outright (private mode).
+const readStore = (key) => {
+  try { return localStorage.getItem(key); } catch { return null; }
+};
 
 const state = {
   period: localStorage.getItem("mt.period") || "3M",
   grouping: localStorage.getItem("mt.grouping") === "all" ? "all" : "sector",
-  cols: loadCols(),
-  filters: loadFilters(),
-  collapsed: new Set(JSON.parse(localStorage.getItem("mt.collapsed") || "[]")),
+  cols: loadCols(readStore),
+  filters: loadFilters(readStore),
+  collapsed: new Set(loadCollapsed(readStore)),
   sort: { key: "ticker", dir: 1 },
   data: null,
 };
@@ -69,15 +46,8 @@ if (urlGroup === "all" || urlGroup === "sector") state.grouping = urlGroup;
 const $ = (id) => document.getElementById(id);
 const tableWrap = document.querySelector(".table-wrap");
 
-/* ---------- formatting ---------- */
-
-function fmtPrice(v) {
-  if (v == null || !isFinite(v)) return "—";
-  const digits = Math.abs(v) < 1 ? 4 : 2;
-  return "$" + v.toLocaleString(undefined, {
-    minimumFractionDigits: 2, maximumFractionDigits: digits,
-  });
-}
+/* ---------- formatting ----------
+   escapeHtml / fmtPrice / fmtBig / relDate / renderMarkdown live in lib.js. */
 
 function pctChip(v) {
   if (v == null || !isFinite(v)) return '<span class="muted">—</span>';
@@ -92,29 +62,34 @@ function fmtMetric(v, fmt) {
   return escapeHtml(String(v));
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
 /* ---------- data ---------- */
 
+// Monotonic token: only the newest load() may render, clear the spinner, or
+// show an error. Without it, a slow earlier period's response can land after a
+// newer one and paint stale data under the highlighted button.
+let loadSeq = 0;
+
 async function load(refresh = false) {
+  const seq = ++loadSeq;
   tableWrap.classList.add("loading");
   document.body.classList.add("loading");
   $("refreshBtn").disabled = true;
   try {
     const res = await fetch(`/api/overview?period=${state.period}&refresh=${refresh}`);
     if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
-    state.data = await res.json();
+    const data = await res.json();
+    if (seq !== loadSeq) return;   // superseded — a newer load owns the view
+    state.data = data;
     render();
   } catch (err) {
-    showBanner(`Failed to load data: ${err.message}`);
+    if (seq === loadSeq) showBanner(`Failed to load data: ${err.message}`);
   } finally {
-    tableWrap.classList.remove("loading");
-    document.body.classList.remove("loading");
-    $("refreshBtn").disabled = false;
+    // A superseded response must not clear the newer request's loading state.
+    if (seq === loadSeq) {
+      tableWrap.classList.remove("loading");
+      document.body.classList.remove("loading");
+      $("refreshBtn").disabled = false;
+    }
   }
 }
 
@@ -206,41 +181,19 @@ function visibleColumns() {
     (!c.allOnly || state.grouping === "all") && (!c.def || colVisible(c.def)));
 }
 
-function cellValue(row, col) {
-  if (row.error) return null;
-  return col.metric ? row.metrics?.[col.metric] : row[col.key];
-}
-
-/* ---------- numeric filters (All view) ---------- */
-
-const FILTERABLE_TYPES = new Set(["mcap", "price", "pct", "pct_abs", "int"]);
-
-// "10B", "$500m", "-2.5", "3,000" → number; null if unparseable.
-function parseNumInput(s) {
-  const m = String(s).trim().replace(/[$,%\s]/g, "").match(/^(-?\d*\.?\d+)([kmbt])?$/i);
-  if (!m) return null;
-  const mult = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[(m[2] || "").toLowerCase()] || 1;
-  return Number(m[1]) * mult;
-}
+/* ---------- numeric filters (All view) ----------
+   cellValue / parseNumInput / applyFilters live in lib.js. */
 
 function filterableColumns() {
   return columnUniverse().filter((c) => FILTERABLE_TYPES.has(c.type));
 }
 
-function saveFilters() {
-  localStorage.setItem("mt.filters", JSON.stringify(state.filters));
+function filterDefs() {
+  return Object.fromEntries(filterableColumns().map((c) => [c.key, c]));
 }
 
-function applyFilters(rows) {
-  if (!state.filters.length) return rows;
-  const defs = Object.fromEntries(filterableColumns().map((c) => [c.key, c]));
-  return rows.filter((r) => state.filters.every((f) => {
-    const def = defs[f.key];
-    if (!def) return true; // metric no longer exists — ignore; chip stays removable
-    const v = cellValue(r, def);
-    if (typeof v !== "number" || !isFinite(v)) return false;
-    return f.op === "gte" ? v >= f.value : v <= f.value;
-  }));
+function saveFilters() {
+  localStorage.setItem("mt.filters", JSON.stringify(state.filters));
 }
 
 function fmtFilterValue(f, def) {
@@ -259,7 +212,7 @@ function renderFilterChips(total, shown) {
     wrap.innerHTML = "";
     return;
   }
-  const defs = Object.fromEntries(filterableColumns().map((c) => [c.key, c]));
+  const defs = filterDefs();
   const chips = state.filters.map((f, i) => {
     const def = defs[f.key];
     return `<span class="fchip">${escapeHtml(def ? def.label : f.key)}
@@ -303,7 +256,7 @@ function renderTable() {
     // Flat cross-sector list: filter, then rank the whole portfolio.
     const all = state.data.sectors.flatMap((sec) =>
       sec.stocks.map((r) => ({ ...r, sector: sec.name })));
-    const rows = sortRows(applyFilters(all), cols);
+    const rows = sortByCurrent(applyFilters(all, state.filters, filterDefs()), cols);
     tbody.innerHTML = rows.map((r) => stockRow(r, cols)).join("");
     renderFilterChips(all.length, rows.length);
     return;
@@ -325,22 +278,15 @@ function renderTable() {
       </tr>`;
     if (collapsed || !sec.stocks.length) return header;
 
-    const rows = sortRows(sec.stocks, cols);
+    const rows = sortByCurrent(sec.stocks, cols);
     return header + rows.map((r) => stockRow(r, cols)).join("");
   }).join("");
 }
 
-function sortRows(rows, cols) {
+// Rank rows by the currently selected sort column (comparator lives in lib.js).
+function sortByCurrent(rows, cols) {
   const col = cols.find((c) => c.key === state.sort.key) || cols[0];
-  return [...rows].sort((a, b) => {
-    const va = cellValue(a, col), vb = cellValue(b, col);
-    if (va == null && vb == null) return 0;
-    if (va == null) return 1;          // nulls sink regardless of direction
-    if (vb == null) return -1;
-    const cmp = typeof va === "string"
-      ? va.localeCompare(vb) : va - vb;
-    return cmp * state.sort.dir;
-  });
+  return sortRows(rows, col, state.sort.dir);
 }
 
 function stockRow(r, cols) {
@@ -640,55 +586,6 @@ const detailModal = $("detailModal");
 let detailOpenedFromApp = false;
 let detailTicker = null;
 let detailPeriod = null; // overlay-local timeframe; never touches the dashboard's
-
-function fmtBig(v) {
-  if (v == null || !isFinite(v)) return "—";
-  const a = Math.abs(v);
-  if (a >= 1e12) return (v / 1e12).toFixed(2) + "T";
-  if (a >= 1e9) return (v / 1e9).toFixed(2) + "B";
-  if (a >= 1e6) return (v / 1e6).toFixed(1) + "M";
-  if (a >= 1e3) return (v / 1e3).toFixed(1) + "K";
-  return String(v);
-}
-
-function relDate(iso) {
-  if (!iso) return "";
-  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
-  if (isNaN(days)) return "";
-  return days <= 0 ? "today" : days === 1 ? "1d ago" : `${days}d ago`;
-}
-
-// Minimal, safe markdown: escape everything first, then re-introduce a small
-// whitelist of formatting (##/###, bullet lists, **bold**, *italic*).
-function renderMarkdown(md) {
-  const lines = escapeHtml(md).split(/\r?\n/);
-  let html = "", inList = false;
-  let para = [];
-  const flushPara = () => {
-    if (para.length) { html += `<p>${para.join(" ")}</p>`; para = []; }
-  };
-  const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
-  for (const raw of lines) {
-    const line = raw.trim();
-    if (!line) { flushPara(); closeList(); continue; }
-    if (line.startsWith("### ")) { flushPara(); closeList(); html += `<h4>${line.slice(4)}</h4>`; continue; }
-    if (line.startsWith("## ")) { flushPara(); closeList(); html += `<h3>${line.slice(3)}</h3>`; continue; }
-    if (line.startsWith("# ")) { flushPara(); closeList(); html += `<h3>${line.slice(2)}</h3>`; continue; }
-    if (line.startsWith("- ")) {
-      flushPara();
-      if (!inList) { html += "<ul>"; inList = true; }
-      html += `<li>${line.slice(2)}</li>`;
-      continue;
-    }
-    closeList();
-    para.push(line);
-  }
-  flushPara(); closeList();
-  return html
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[\[([^\]]+)\]\]/g, '<span class="wikilink">$1</span>');
-}
 
 function chartSVG(points) {
   if (!points || points.length < 2) {
