@@ -8,7 +8,6 @@ import pytest
 from app import metrics
 from tests.conftest import make_daily, make_intraday
 
-
 # --------------------------------------------------------------------------
 # range_stats — the 11 OHLC relationships aggregated over a window
 # --------------------------------------------------------------------------

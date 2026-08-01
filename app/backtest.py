@@ -88,7 +88,7 @@ def run_backtest(df: Optional[pd.DataFrame], rule: dict) -> dict:
         date = bars.index[i]
         o = float(bars["Open"].iloc[i])
         h = float(bars["High"].iloc[i])
-        l = float(bars["Low"].iloc[i])
+        lo = float(bars["Low"].iloc[i])
         c = float(bars["Close"].iloc[i])
 
         if pos is None:
@@ -109,7 +109,7 @@ def run_backtest(df: Optional[pd.DataFrame], rule: dict) -> dict:
             else:
                 threshold_pct = -float(rule["entry_value"])
             limit = pc * (1 + threshold_pct / 100)
-            if l > limit:
+            if lo > limit:
                 continue
             fill = o if o < limit else limit  # gap through the level → open
 
@@ -131,12 +131,12 @@ def run_backtest(df: Optional[pd.DataFrame], rule: dict) -> dict:
             }
             # Entry day: stop can trigger (conservative), take-profit cannot.
             stop, _ = levels()
-            if pos["tranche2_limit"] is not None and l <= pos["tranche2_limit"] and fill > pos["tranche2_limit"]:
+            if pos["tranche2_limit"] is not None and lo <= pos["tranche2_limit"] and fill > pos["tranche2_limit"]:
                 t2_fill = o if o < pos["tranche2_limit"] else pos["tranche2_limit"]
                 pos["tranches"].append({"date": date, "price": t2_fill})
                 pos["tranche2_limit"] = None
                 stop, _ = levels()
-            if l <= stop:
+            if lo <= stop:
                 close_position(min(stop, c) if o > stop else o, date, "stop")
             continue
 
@@ -151,14 +151,14 @@ def run_backtest(df: Optional[pd.DataFrame], rule: dict) -> dict:
 
         # Second tranche on the way down (its level is below the current stop
         # only when the user set it that deep — then the stop wins first).
-        if pos["tranche2_limit"] is not None and l <= pos["tranche2_limit"]:
+        if pos["tranche2_limit"] is not None and lo <= pos["tranche2_limit"]:
             if pos["tranche2_limit"] >= stop:
                 t2_fill = o if o < pos["tranche2_limit"] else pos["tranche2_limit"]
                 pos["tranches"].append({"date": date, "price": t2_fill})
                 pos["tranche2_limit"] = None
                 stop, target = levels()
 
-        if l <= stop:
+        if lo <= stop:
             close_position(stop, date, "stop")
             continue
         if o >= target:  # gap above the target → out at the (better) open

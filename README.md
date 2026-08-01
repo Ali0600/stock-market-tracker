@@ -20,6 +20,26 @@ no API key, no cost.
 
 Requires Python 3.12 (Homebrew: `brew install python@3.12`).
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q                            # 130 backend tests
+node --test tests/frontend/*.test.mjs  # 18 frontend tests, no npm needed
+ruff check app/ tests/ scripts/
+```
+
+The same three commands run in CI on every push and pull request
+(`.github/workflows/ci.yml`). Nothing in the suite touches the network or the
+real `data/tracker.db` — price data is synthetic and the API tests run against a
+throwaway SQLite file.
+
+The backtest fixtures are the load-bearing ones: they pin the engine's honesty
+invariants (no look-ahead, conservative fills, stop-assumed-before-target, no
+entry-day take-profit) with expectations computed by hand, so a change in
+behavior surfaces as a specific arithmetic mismatch. Each was verified to fail
+against deliberately broken code before being trusted.
+
 ## How it works
 
 - **Sectors & stocks** live in SQLite (`data/tracker.db`). First run seeds a
@@ -211,6 +231,13 @@ def range_pct(daily, intraday):
   fact-checking, provenance-linked knowledge routing, per-source price-impact
   tracking, and read-only API/UI integration — deliberately RAG-free at this
   scale
+- Established a **148-test behavior suite and CI pipeline** (GitHub Actions:
+  lint, backend, frontend) covering the HTTP contract, concurrency, and
+  financial-simulation correctness — with every invariant verified to fail
+  against deliberately broken code before being trusted as a gate
+- Hardened a **thread-safe TTL cache** by scoping locks per cache slot so a slow
+  upstream fetch can no longer stall unrelated reads, with regression tests that
+  assert concurrent fetches overlap rather than serialize
 
 ## Limitations
 

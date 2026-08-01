@@ -1,0 +1,24 @@
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+# Correctness-focused: pyflakes, the pycodestyle error classes, import order,
+# and bugbear's real-defect rules. Deliberately not the style-modernization
+# families (UP/DTZ/FURB) — this codebase consistently uses Optional[...] and
+# naive local timestamps, and churning that would bury real findings.
+select = ["F", "E4", "E7", "E9", "B", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Fixtures and monkeypatching legitimately reach into private module state.
+"tests/*" = ["E402"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Keep the repo root importable so `from app import ...` works without install.
+pythonpath = ["."]
+filterwarnings = [
+    # Starlette's TestClient nudges toward httpx2; not actionable here.
+    "ignore::DeprecationWarning:starlette.*",
+    "ignore:Using `httpx` with `starlette.testclient`:UserWarning",
+]

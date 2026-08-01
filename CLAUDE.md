@@ -20,10 +20,18 @@
 
 ## Analysis tools & boundaries
 - `app/backtest.py` (`POST /api/backtest`, `#/backtest`) and `GET /api/deviations` (`#/deviations`) are **descriptive-only by explicit agreement with the owner**: never add buy/sell/hold output, signal language, position-sizing advice, or auto-firing alerts anywhere in the app or vault. The tools compute; the owner decides.
-- Backtest honesty invariants to preserve when touching the engine: trailing stats shifted one day (no look-ahead), limit fills require the day's range to reach the price, gaps fill at the open, same-day stop-before-target, no entry-day take-profit, costs on by default, buy-&-hold benchmark always shown. Engine changes must keep the hand-computed fixture tests passing (currently a scratch file in /tmp — moving them into the repo is on the backlog).
+- Backtest honesty invariants to preserve when touching the engine: trailing stats shifted one day (no look-ahead), limit fills require the day's range to reach the price, gaps fill at the open, same-day stop-before-target, no entry-day take-profit, costs on by default, buy-&-hold benchmark always shown. These are pinned by hand-computed fixtures in `tests/test_backtest.py` — engine changes must keep them green.
+
+## Tests
+- `venv/bin/python -m pytest -q` (backend) · `node --test tests/frontend/*.test.mjs` (frontend, no npm) · `venv/bin/ruff check app/ tests/ scripts/`. All three run in CI (`.github/workflows/ci.yml`) on push and PR.
+- `node --test <dir>` does NOT walk a directory on Node 22 — it treats the path as a module and fails. Always pass the glob.
+- Tests never hit the network or `data/tracker.db`: `tests/conftest.py` builds synthetic OHLC frames, and the API tests monkeypatch `db.DB_PATH` to a tmp file plus stub every `prices.*`/`vault.*` call.
+- Prove a new gate fails before trusting it: sabotage the code with an inverse Edit pair (never `git checkout` — the tree usually has uncommitted work), confirm the *specific* test goes red, restore, and check the file's checksum returned to its pre-sabotage value. Two tests here passed against sabotage and had to be strengthened — a metric that reports the same value scoped or unscoped can't detect a scoping regression.
+- Lint config lives in `pyproject.toml` and deliberately selects the correctness families (`F`, `E4/E7/E9`, `B`, `I`) rather than the style-modernization ones — the codebase consistently uses `Optional[...]`, and churning that would bury real findings.
 
 ## Workflow
 - Commit each verified change as you go (owner preference). Descriptive messages, author = owner only — never a Claude co-author trailer. The repo is destined for public GitHub: run the leak check (no `data/`, `venv/`, `.claude/settings.local.json`, secrets, or absolute personal paths) before commits that add files.
+- Port 8000 is often taken by another local app — verify on a free port (e.g. 8010) rather than killing whatever holds it.
 
 ## Verifying UI changes
 - The Claude Preview panel cannot start servers from this folder (see global CLAUDE.md → machine notes). Run the server with Bash and screenshot with headless Chrome instead.

@@ -201,7 +201,7 @@ def add_stock(body: StockCreate):
     try:
         name, shares = prices.validate_ticker(ticker)
     except ValueError as exc:
-        raise HTTPException(422, str(exc))
+        raise HTTPException(422, str(exc)) from exc
 
     sector_id = db.get_or_create_sector(sector_name) if sector_name else body.sector_id
     stock_id = db.add_stock(ticker, name, sector_id)

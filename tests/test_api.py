@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import db, main, prices, vault
-from tests.conftest import make_daily, make_intraday
+from tests.conftest import make_daily
 
 PRICED = make_daily([
     (100.0, 100.0, 100.0, 100.0),

@@ -134,7 +134,7 @@ def today_vs_typical(daily: Optional[pd.DataFrame], lookback: int = 63) -> Optio
 def range_defs() -> list[dict]:
     """Column-picker definitions for every (metric, aggregate) pair."""
     defs = []
-    for key, label, base_col, target_col in DAILY_RANGE_METRICS:
+    for key, label, _base_col, _target_col in DAILY_RANGE_METRICS:
         for agg_key, agg_label in AGGREGATES:
             defs.append({
                 "key": f"rs:{key}:{agg_key}",

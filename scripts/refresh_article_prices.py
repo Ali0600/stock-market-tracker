@@ -74,7 +74,11 @@ def main() -> None:
 
         text = path.read_text(encoding="utf-8")
         if MARKER.search(text):
-            updated = MARKER.sub(lambda _: block, text)
+            # A replacement FUNCTION (not a string) so backslashes and \1-style
+            # sequences inside the generated table are inserted literally rather
+            # than read as group references. sub() calls it immediately, within
+            # this iteration, so the late-binding B023 warns about cannot occur.
+            updated = MARKER.sub(lambda _: block, text)  # noqa: B023
         else:
             updated = text.rstrip() + "\n\n## Price Since Publication\n" + block + "\n"
         if updated != text:
