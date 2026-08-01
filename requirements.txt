@@ -1,3 +1,9 @@
+# yfinance 1.x only: app/prices.py reads news items nested under item["content"]
+# and treats info["dividendYield"] as already-in-percent. Both differ in 0.2.x,
+# and the breakage is silent (empty news, yields 100x off) — keep the floor.
 fastapi>=0.115
 uvicorn[standard]>=0.30
-yfinance>=0.2.50
+yfinance>=1.4,<2
+# Imported directly by app/metrics.py and app/prices.py, not just via yfinance.
+pandas>=2.2
+numpy>=1.26
