@@ -246,3 +246,11 @@ def range_pct(daily, intraday):
 - Prices are displayed in the listing currency with a `$` prefix — non-USD
   listings (e.g. `.TO` tickers) aren't currency-converted
 - Single-user by design: the cache is in-process and the DB is a local file
+
+## License
+
+[MIT](LICENSE) — © 2026 Ali Hassan.
+
+Not affiliated with Yahoo. Price data comes from Yahoo Finance via yfinance and
+is subject to their terms; this project is for personal research and is not
+investment advice.
