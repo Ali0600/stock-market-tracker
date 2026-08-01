@@ -5,7 +5,7 @@ import logging
 import math
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Callable, Optional
 
 import pandas as pd
@@ -35,9 +35,32 @@ INTRADAY_TTL = 300
 INFO_TTL = 3600
 NEWS_TTL = 900
 
-_lock = threading.Lock()
+# _state_lock guards the two dicts below and is only ever held for dict
+# access — never across a network fetch. Each slot then gets its own lock so a
+# slow fetch in one slot can't stall cache reads (or fetches) in another.
+_state_lock = threading.Lock()
 # slot -> (tickers_key, fetched_at_epoch, {ticker: DataFrame})
 _cache: dict[str, tuple[tuple, float, dict]] = {}
+_slot_locks: dict[str, threading.Lock] = {}
+
+
+def _slot_lock(slot: str) -> threading.Lock:
+    with _state_lock:
+        lock = _slot_locks.get(slot)
+        if lock is None:
+            lock = _slot_locks[slot] = threading.Lock()
+        return lock
+
+
+def _read_cache(slot: str, tickers_key: tuple, ttl: int
+                ) -> tuple[Optional[tuple], bool]:
+    """(entry, is_fresh) for the slot — entry is None when nothing usable is
+    cached for this ticker set."""
+    with _state_lock:
+        hit = _cache.get(slot)
+    if hit is None or hit[0] != tickers_key:
+        return None, False
+    return hit, (time.time() - hit[1]) < ttl
 
 
 def _split(df: Optional[pd.DataFrame], tickers: tuple) -> dict[str, pd.DataFrame]:
@@ -65,21 +88,33 @@ def _cached_fetch(slot: str, tickers_key: tuple, ttl: int, force: bool,
                   fetch: Callable[[], dict]) -> tuple[dict, float, bool]:
     """Return (frames, fetched_at, stale). Serves the previous result if the
     fetch fails; raises only when there is nothing cached to fall back on.
-    The lock also collapses concurrent requests into one Yahoo fetch."""
-    with _lock:
-        hit = _cache.get(slot)
-        usable = hit is not None and hit[0] == tickers_key
-        if usable and not force and (time.time() - hit[1]) < ttl:
+    The per-slot lock collapses concurrent requests for the SAME slot into one
+    Yahoo fetch, while leaving other slots free to read their caches."""
+    hit, fresh = _read_cache(slot, tickers_key, ttl)
+    if fresh and not force:
+        return hit[2], hit[1], False
+    seen_at = hit[1] if hit else None
+
+    with _slot_lock(slot):
+        # Re-check: another thread may have refreshed this slot while we waited.
+        # A forced refresh accepts that thread's result (so concurrent refreshes
+        # collapse into one fetch) but never accepts the entry it already saw —
+        # otherwise force would be a no-op.
+        hit, fresh = _read_cache(slot, tickers_key, ttl)
+        if fresh and (not force or hit[1] != seen_at):
             return hit[2], hit[1], False
         try:
             frames = fetch()
         except Exception:
+            # Never cache a failure: leaving the old entry in place means the
+            # next call retries instead of serving an empty result for the TTL.
             log.exception("yfinance fetch failed (%s)", slot)
-            if usable:
+            if hit is not None:
                 return hit[2], hit[1], True
             raise
         entry = (tickers_key, time.time(), frames)
-        _cache[slot] = entry
+        with _state_lock:
+            _cache[slot] = entry
         return frames, entry[1], False
 
 
@@ -225,8 +260,8 @@ def cache_status() -> list[dict]:
     """Snapshot of the in-memory fetch caches, for the DB view."""
     now = time.time()
     out = []
-    with _lock:
-        for slot, (key, fetched_at, data) in _cache.items():
+    with _state_lock:
+        for slot, (key, fetched_at, data) in list(_cache.items()):
             if slot.startswith("info:"):
                 ttl = INFO_TTL
             elif slot.startswith("news:"):
