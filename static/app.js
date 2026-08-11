@@ -81,6 +81,7 @@ async function load(refresh = false) {
     if (seq !== loadSeq) return;   // superseded — a newer load owns the view
     state.data = data;
     render();
+    refreshAlertBadge();           // keep the topbar count current, fire-and-forget
   } catch (err) {
     if (seq === loadSeq) showBanner(`Failed to load data: ${err.message}`);
   } finally {
@@ -820,7 +821,7 @@ function fmtAge(seconds) {
   return seconds < 90 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
 }
 
-const PAGE_VIEWS = ["dbView", "btView", "devView"];
+const PAGE_VIEWS = ["dbView", "btView", "devView", "alView"];
 
 function showPage(sectionId) {
   document.body.classList.add("db-mode");
@@ -1043,6 +1044,7 @@ $("brand").addEventListener("click", () => { location.hash = ""; });
 $("dbBtn").addEventListener("click", () => { location.hash = "#/db"; });
 $("btBtn").addEventListener("click", () => { location.hash = "#/backtest"; });
 $("devBtn").addEventListener("click", () => { location.hash = "#/deviations"; });
+$("alBtn").addEventListener("click", () => { location.hash = "#/alerts"; });
 
 /* ---------- backtest page (historical simulation — descriptive only) ---------- */
 
@@ -1312,6 +1314,235 @@ $("devView").addEventListener("click", (e) => {
   }
 });
 
+/* ---------- alerts page (owner-authored conditions — descriptive only) ---------- */
+
+const alState = { data: null, saving: false, error: "" };
+
+function alStatLabel(key) {
+  const def = (alState.data?.stat_defs || []).find((d) => d.key === key);
+  return def ? def.label : key;
+}
+
+function alStatOptions(selected) {
+  let html = "", lastGroup = null;
+  for (const def of alState.data?.stat_defs || []) {
+    if (def.group !== lastGroup) {
+      if (lastGroup !== null) html += "</optgroup>";
+      html += `<optgroup label="${escapeHtml(def.group)}">`;
+      lastGroup = def.group;
+    }
+    html += `<option value="${escapeHtml(def.key)}" ${def.key === selected ? "selected" : ""}>
+      ${escapeHtml(def.label)}</option>`;
+  }
+  return html + (lastGroup === null ? "" : "</optgroup>");
+}
+
+async function enterAlView() {
+  showPage("alView");
+  if (!alState.data) $("alView").innerHTML = '<p class="muted db-loading">Loading alerts…</p>';
+  await loadAlerts();
+  if (location.hash === "#/alerts") renderAlView();
+}
+
+async function loadAlerts() {
+  try {
+    const res = await fetch("/api/alerts");
+    if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+    alState.data = await res.json();
+    updateAlertBadge(alState.data.triggered_count);
+  } catch (err) {
+    alState.error = err.message;
+  }
+}
+
+function updateAlertBadge(count) {
+  const badge = $("alBadge");
+  badge.textContent = count > 0 ? count : "";
+  badge.classList.toggle("hidden", !count);
+}
+
+/* Keeps the topbar count honest after a dashboard load, without forcing the
+   user onto the Alerts page to find out something changed. */
+async function refreshAlertBadge() {
+  try {
+    const res = await fetch("/api/alerts");
+    if (!res.ok) return;
+    const data = await res.json();
+    updateAlertBadge(data.triggered_count);
+  } catch { /* the badge is informational — never surface a failure here */ }
+}
+
+function alRuleCard(rule) {
+  const state = ruleState(rule);
+  const summary = describeRule(rule, alStatLabel(rule.metric_key));
+  const observed = rule.matches
+    .map((m) => `<span class="al-hit" data-goto-stock="${escapeHtml(m.ticker)}"
+                   title="Open ${escapeHtml(m.ticker)}">${escapeHtml(m.ticker)}
+                   <b>${m.observed}</b></span>`).join("");
+  const stateChip = {
+    met: `<span class="al-state met">condition met</span>`,
+    unmet: `<span class="al-state unmet">not met</span>`,
+    paused: `<span class="al-state paused">paused</span>`,
+    unavailable: `<span class="al-state unavail">stat unavailable</span>`,
+  }[state];
+  const unavailable = rule.unavailable.length && state !== "paused"
+    ? `<div class="al-unavail-note">no reading for ${
+        rule.unavailable.map(escapeHtml).join(", ")}</div>`
+    : "";
+
+  return `
+    <div class="al-card ${state}">
+      <div class="al-card-head">
+        <div>
+          <div class="al-name">${escapeHtml(rule.name)}</div>
+          <div class="al-summary">${escapeHtml(summary)}</div>
+        </div>
+        <div class="al-actions">
+          ${stateChip}
+          <button class="iconbtn" data-al-toggle="${rule.id}"
+                  title="${rule.enabled ? "Pause this alert" : "Resume this alert"}">${
+                    rule.enabled ? "⏸" : "▶"}</button>
+          <button class="iconbtn del" data-al-del="${rule.id}" title="Delete this alert">✕</button>
+        </div>
+      </div>
+      ${observed ? `<div class="al-hits">${observed}</div>` : ""}
+      ${unavailable}
+    </div>`;
+}
+
+function renderAlView() {
+  const d = alState.data;
+  if (!d) {
+    $("alView").innerHTML =
+      `<p class="form-error db-loading">Failed to load alerts: ${escapeHtml(alState.error)}</p>`;
+    return;
+  }
+  const tickers = (state.data ? state.data.sectors.flatMap((s) => s.stocks.map((x) => x.ticker)) : [])
+    .sort();
+  const rules = d.rules.length
+    ? d.rules.map(alRuleCard).join("")
+    : `<p class="muted">No alerts yet. Build one above — pick a statistic, a
+       direction and a threshold, and this page will report when it holds.</p>`;
+
+  $("alView").innerHTML = `
+    <div class="db-head">
+      <h2>Alerts <span class="muted">· your conditions — descriptive only</span></h2>
+      <button class="btn" id="alBack" style="margin-left:auto">← Dashboard</button>
+    </div>
+    <p class="muted dev-note">Each alert is a condition you define over the statistics the app
+      already tracks. The page reports whether it currently holds and the value behind it —
+      it doesn't interpret what that means.</p>
+
+    <div class="al-builder">
+      <label class="bt-field">Stock
+        <select id="alTicker">
+          <option value="">Any stock</option>
+          ${tickers.map((t) => `<option value="${t}">${t}</option>`).join("")}
+        </select>
+      </label>
+      <label class="bt-field">Timeframe
+        <select id="alPeriod">${PERIODS.map((p) =>
+          `<option value="${p}" ${p === "3M" ? "selected" : ""}>${p}</option>`).join("")}
+        </select>
+      </label>
+      <label class="bt-field al-stat">Statistic
+        <select id="alStat">${alStatOptions("m:green_days")}</select>
+      </label>
+      <label class="bt-field">Is
+        <select id="alOp">
+          <option value="gte">≥</option>
+          <option value="lte">≤</option>
+        </select>
+      </label>
+      <label class="bt-field">Value
+        <input id="alValue" placeholder="e.g. 5" autocomplete="off" spellcheck="false">
+      </label>
+      <label class="bt-field al-name-field">Name <span class="muted">(optional)</span>
+        <input id="alName" placeholder="auto" autocomplete="off" maxlength="80">
+      </label>
+      <button id="alAdd" class="btn primary" ${alState.saving ? "disabled" : ""}>
+        ${alState.saving ? "Saving…" : "Add alert"}</button>
+    </div>
+    ${alState.error ? `<p class="form-error">${escapeHtml(alState.error)}</p>` : ""}
+
+    <h3 class="db-sub">${d.rules.length} alert${d.rules.length === 1 ? "" : "s"}
+      <span class="muted">— ${d.triggered_count} currently met</span></h3>
+    <div class="al-list">${rules}</div>
+    <p class="analysis-meta">Conditions are evaluated against the same data the dashboard
+      shows, when this page loads. Statistics that can't be computed for a stock are listed
+      as unavailable rather than counted as "not met".</p>`;
+
+  $("alBack").addEventListener("click", () => { location.hash = ""; });
+  $("alAdd").addEventListener("click", addAlert);
+}
+
+async function addAlert() {
+  const value = parseNumInput($("alValue").value);
+  if (value == null) {
+    $("alValue").classList.add("invalid");
+    $("alValue").focus();
+    return;
+  }
+  const rule = {
+    ticker: $("alTicker").value || null,
+    period: $("alPeriod").value,
+    metric_key: $("alStat").value,
+    op: $("alOp").value,
+    value,
+  };
+  rule.name = $("alName").value.trim() ||
+    composeRuleName(rule, alStatLabel(rule.metric_key));
+
+  alState.saving = true;
+  alState.error = "";
+  renderAlView();
+  try {
+    const res = await fetch("/api/alerts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(rule),
+    });
+    if (!res.ok) {
+      const detail = (await res.json()).detail;
+      throw new Error(typeof detail === "string" ? detail : "Invalid alert");
+    }
+  } catch (err) {
+    alState.error = err.message;
+  } finally {
+    alState.saving = false;
+  }
+  await loadAlerts();
+  if (location.hash === "#/alerts") renderAlView();
+}
+
+$("alView").addEventListener("click", async (e) => {
+  const toggle = e.target.closest("button[data-al-toggle]");
+  if (toggle) {
+    const rule = alState.data.rules.find((r) => String(r.id) === toggle.dataset.alToggle);
+    await fetch(`/api/alerts/${toggle.dataset.alToggle}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: !(rule && rule.enabled) }),
+    });
+    await loadAlerts();
+    renderAlView();
+    return;
+  }
+  const del = e.target.closest("button[data-al-del]");
+  if (del) {
+    if (!confirm("Delete this alert?")) return;
+    await fetch(`/api/alerts/${del.dataset.alDel}`, { method: "DELETE" });
+    await loadAlerts();
+    renderAlView();
+    return;
+  }
+  const hit = e.target.closest("[data-goto-stock]");
+  if (hit) {
+    detailOpenedFromApp = true;
+    location.hash = "#/stock/" + hit.dataset.gotoStock;
+  }
+});
+
 function handleRoute() {
   if (location.hash === "#/db") {
     if (detailModal.open) detailModal.close();
@@ -1327,6 +1558,11 @@ function handleRoute() {
   if (location.hash === "#/deviations") {
     if (detailModal.open) detailModal.close();
     enterDevView();
+    return;
+  }
+  if (location.hash === "#/alerts") {
+    if (detailModal.open) detailModal.close();
+    enterAlView();
     return;
   }
   exitDbView();

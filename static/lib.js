@@ -158,6 +158,39 @@ function sortRows(rows, col, dir) {
   return [...rows].sort((a, b) => compareRows(a, b, col, dir));
 }
 
+/* ---------- alert rules ---------- */
+
+const OP_SYMBOL = { gte: "≥", lte: "≤" };
+
+/* Plain-language summary of a rule: what is being watched, over what window,
+   and the threshold the owner set. Purely descriptive — it restates the
+   condition, never what a met condition might mean. */
+function describeRule(rule, statLabel) {
+  const who = rule.ticker || "Any stock";
+  const label = statLabel || rule.metric_key;
+  const op = OP_SYMBOL[rule.op] || rule.op;
+  return `${who} · ${label} (${rule.period}) ${op} ${rule.value}`;
+}
+
+/* Default name for a new rule, so the owner gets a sensible label without
+   having to invent one. */
+function composeRuleName(rule, statLabel) {
+  const who = rule.ticker || "Any stock";
+  const label = statLabel || rule.metric_key;
+  return `${who}: ${label} ${OP_SYMBOL[rule.op] || rule.op} ${rule.value}`;
+}
+
+/* A rule's current state, as one of three distinct outcomes. "unavailable"
+   exists so a stat that could not be computed is never rendered as a
+   confident "not met". */
+function ruleState(rule) {
+  if (!rule.enabled) return "paused";
+  if (rule.matches && rule.matches.length) return "met";
+  if (rule.unavailable && rule.unavailable.length &&
+      !(rule.matches && rule.matches.length)) return "unavailable";
+  return "unmet";
+}
+
 /* Node test harness only — browsers ignore this. */
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -165,5 +198,6 @@ if (typeof module !== "undefined" && module.exports) {
     loadCols, loadFilters, loadCollapsed,
     FILTERABLE_TYPES, parseNumInput, cellValue, applyFilters,
     compareRows, sortRows,
+    OP_SYMBOL, describeRule, composeRuleName, ruleState,
   };
 }

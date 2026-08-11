@@ -16,6 +16,7 @@
     <span id="staleBadge" class="badge stale hidden" title="Live fetch failed — showing last cached data">cached</span>
   </div>
   <div class="topbar-actions">
+    <button id="alBtn" class="btn" title="Your saved conditions and which currently hold">⚑ Alerts<span id="alBadge" class="al-badge hidden"></span></button>
     <button id="devBtn" class="btn" title="Today vs each stock's typical behavior (z-scores)">σ Today</button>
     <button id="btBtn" class="btn" title="Historical rule simulation — descriptive only">⌁ Backtest</button>
     <button id="dbBtn" class="btn" title="Read-only database view">⛁ Data</button>
@@ -88,6 +89,7 @@
   <section id="dbView" class="db-view hidden" aria-label="Database view"></section>
   <section id="btView" class="db-view hidden" aria-label="Backtest"></section>
   <section id="devView" class="db-view hidden" aria-label="Deviations"></section>
+  <section id="alView" class="db-view hidden" aria-label="Alerts"></section>
 </main>
 
 <dialog id="addModal">

@@ -200,3 +200,52 @@ test("relDate buckets by whole days from a fixed now", () => {
   assert.equal(lib.relDate(null, now), "");
   assert.equal(lib.relDate("not-a-date", now), "");
 });
+
+/* ---------- alert rules ---------- */
+
+test("describeRule restates the condition without interpreting it", () => {
+  const rule = { ticker: "AAOI", period: "1M", metric_key: "m:red_days",
+                 op: "gte", value: 12 };
+  assert.equal(lib.describeRule(rule, "Red Days"), "AAOI · Red Days (1M) ≥ 12");
+});
+
+test("describeRule labels a ticker-less rule as a screener", () => {
+  const rule = { ticker: null, period: "3M", metric_key: "m:streak",
+                 op: "lte", value: -3 };
+  assert.equal(lib.describeRule(rule, "Streak"), "Any stock · Streak (3M) ≤ -3");
+});
+
+test("describeRule falls back to the raw key when no label is known", () => {
+  const rule = { ticker: "NVDA", period: "1D", metric_key: "m:mystery",
+                 op: "gte", value: 1 };
+  assert.ok(lib.describeRule(rule, null).includes("m:mystery"));
+});
+
+test("composeRuleName builds a default name from the rule's parts", () => {
+  const rule = { ticker: "NVDA", metric_key: "m:green_days", op: "gte", value: 5 };
+  assert.equal(lib.composeRuleName(rule, "Green Days"), "NVDA: Green Days ≥ 5");
+  assert.equal(lib.composeRuleName({ ...rule, ticker: null }, "Green Days"),
+               "Any stock: Green Days ≥ 5");
+});
+
+test("ruleState separates met, unmet, unavailable and paused", () => {
+  const base = { enabled: true, matches: [], unavailable: [] };
+  assert.equal(lib.ruleState({ ...base, matches: [{ ticker: "NVDA", observed: 3 }] }), "met");
+  assert.equal(lib.ruleState(base), "unmet");
+  assert.equal(lib.ruleState({ ...base, unavailable: ["MSFT"] }), "unavailable");
+  assert.equal(lib.ruleState({ ...base, enabled: false }), "paused");
+});
+
+test("a rule that matched somewhere reads as met even if another stock had no reading", () => {
+  /* Otherwise one unreadable stock would mask a condition that genuinely
+     holds elsewhere. */
+  const rule = { enabled: true, matches: [{ ticker: "NVDA", observed: 4 }],
+                 unavailable: ["MSFT"] };
+  assert.equal(lib.ruleState(rule), "met");
+});
+
+test("a paused rule reports paused regardless of its stored matches", () => {
+  const rule = { enabled: false, matches: [{ ticker: "NVDA", observed: 4 }],
+                 unavailable: [] };
+  assert.equal(lib.ruleState(rule), "paused");
+});
