@@ -20,6 +20,20 @@ CREATE TABLE IF NOT EXISTS stocks (
     sector_id  INTEGER NOT NULL REFERENCES sectors(id),
     created_at TEXT DEFAULT (datetime('now'))
 );
+-- Owner-authored watch conditions over the tracked statistics. A NULL ticker
+-- means "any tracked stock" (screener style). Descriptive only: a rule states
+-- a threshold the owner chose, and the app reports whether it currently holds.
+CREATE TABLE IF NOT EXISTS alerts (
+    id         INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    ticker     TEXT,
+    period     TEXT NOT NULL,
+    metric_key TEXT NOT NULL,
+    op         TEXT NOT NULL CHECK (op IN ('gte', 'lte')),
+    value      REAL NOT NULL,
+    enabled    INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT DEFAULT (datetime('now'))
+);
 """
 
 # First-run seed: the user's portfolio (June 2026), thematically sectored.
@@ -208,11 +222,44 @@ def set_analysis(ticker: str, analysis_md: str, timestamp: str) -> bool:
         return cur.rowcount > 0
 
 
+def list_alerts(enabled_only: bool = False) -> list[dict]:
+    query = ("SELECT id, name, ticker, period, metric_key, op, value, enabled, created_at "
+             "FROM alerts")
+    if enabled_only:
+        query += " WHERE enabled = 1"
+    query += " ORDER BY id"
+    with closing(connect()) as conn:
+        rows = conn.execute(query).fetchall()
+    return [{**dict(r), "enabled": bool(r["enabled"])} for r in rows]
+
+
+def add_alert(name: str, ticker: Optional[str], period: str, metric_key: str,
+              op: str, value: float) -> int:
+    with closing(connect()) as conn, conn:
+        return conn.execute(
+            """INSERT INTO alerts (name, ticker, period, metric_key, op, value)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (name, ticker, period, metric_key, op, value),
+        ).lastrowid
+
+
+def set_alert_enabled(alert_id: int, enabled: bool) -> bool:
+    with closing(connect()) as conn, conn:
+        cur = conn.execute("UPDATE alerts SET enabled = ? WHERE id = ?",
+                           (1 if enabled else 0, alert_id))
+        return cur.rowcount > 0
+
+
+def delete_alert(alert_id: int) -> bool:
+    with closing(connect()) as conn, conn:
+        return conn.execute("DELETE FROM alerts WHERE id = ?", (alert_id,)).rowcount > 0
+
+
 def dump_tables() -> dict:
     """Read-only dump of every row/column, for the DB view."""
     out = {}
     with closing(connect()) as conn:
-        for table in ("sectors", "stocks"):
+        for table in ("sectors", "stocks", "alerts"):
             columns = [r["name"] for r in conn.execute(f"PRAGMA table_info({table})")]
             rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}")]
             out[table] = {"columns": columns, "rows": rows}

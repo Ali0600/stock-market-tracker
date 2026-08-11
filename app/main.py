@@ -1,6 +1,7 @@
 """Stock Tracker — local market dashboard over yfinance."""
 from __future__ import annotations
 
+import math
 import re
 import time
 from contextlib import asynccontextmanager
@@ -14,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pandas import notna as pd_notna
 from pydantic import BaseModel, Field
 
-from . import backtest, db, metrics, prices, vault
+from . import alerts, backtest, db, metrics, prices, vault
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,12}$")
@@ -55,6 +56,19 @@ class BacktestRule(BaseModel):
 class BacktestRequest(BaseModel):
     tickers: Union[Literal["all"], list[str]] = "all"
     rule: BacktestRule = BacktestRule()
+
+
+class AlertCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    ticker: Optional[str] = Field(default=None, max_length=12)
+    period: str = "3M"
+    metric_key: str = Field(min_length=1, max_length=60)
+    op: Literal["gte", "lte"] = "gte"
+    value: float
+
+
+class AlertToggle(BaseModel):
+    enabled: bool
 
 
 @app.get("/api/overview")
@@ -338,6 +352,58 @@ def deviations():
                              "sector": sec["name"], **dev})
     return {"as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
             "stale": stale, "fetch_error": fetch_error, "stocks": rows}
+
+
+@app.get("/api/alerts")
+def list_alerts(refresh: bool = False):
+    """Owner-authored watch conditions and whether each currently holds.
+    Descriptive only: the app reports the observed statistic, never what to
+    do about it."""
+    rules = db.list_alerts()
+    enabled = [r for r in rules if r["enabled"]]
+    evaluated, stale, fetch_error = alerts.evaluate(enabled, force=refresh)
+    by_id = {r["id"]: r for r in evaluated}
+    out = [by_id.get(r["id"], {**r, "matches": [], "unavailable": []}) for r in rules]
+    return {
+        "as_of": datetime.now().isoformat(timespec="seconds"),
+        "stale": stale,
+        "fetch_error": fetch_error,
+        "stat_defs": alerts.stat_defs(),
+        "triggered_count": sum(1 for r in out if r["enabled"] and r["matches"]),
+        "rules": out,
+    }
+
+
+@app.post("/api/alerts", status_code=201)
+def add_alert(body: AlertCreate):
+    period = body.period.upper()
+    if period not in prices.PERIODS:
+        raise HTTPException(422, f"period must be one of {', '.join(prices.PERIODS)}")
+    if body.metric_key not in alerts.allowed_keys():
+        raise HTTPException(422, "Unknown statistic — pick one from the list")
+    # Checked here rather than on the model so the rejection message never
+    # echoes a value the JSON encoder can't serialize.
+    if not math.isfinite(body.value):
+        raise HTTPException(422, "Threshold must be a finite number")
+    ticker = body.ticker.strip().upper() if body.ticker and body.ticker.strip() else None
+    if ticker and not db.ticker_exists(ticker):
+        raise HTTPException(422, f"{ticker} is not tracked")
+    alert_id = db.add_alert(body.name.strip(), ticker, period,
+                            body.metric_key, body.op, body.value)
+    return {"id": alert_id}
+
+
+@app.patch("/api/alerts/{alert_id}")
+def toggle_alert(alert_id: int, body: AlertToggle):
+    if not db.set_alert_enabled(alert_id, body.enabled):
+        raise HTTPException(404, "Alert not found")
+    return {"ok": True}
+
+
+@app.delete("/api/alerts/{alert_id}", status_code=204)
+def remove_alert(alert_id: int):
+    if not db.delete_alert(alert_id):
+        raise HTTPException(404, "Alert not found")
 
 
 @app.get("/api/sectors")
