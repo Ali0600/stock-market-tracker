@@ -148,13 +148,15 @@ def range_defs() -> list[dict]:
     return defs
 
 
-def metric(key: str, label: str, fmt: str = "text", description: str = ""):
+def metric(key: str, label: str, fmt: str = "text", description: str = "",
+           default_on: bool = True):
     def decorator(fn: Callable) -> Callable:
         REGISTRY[key] = {
             "key": key,
             "label": label,
             "fmt": fmt,
             "description": description,
+            "default_on": default_on,
             "fn": fn,
         }
         return fn
@@ -167,7 +169,7 @@ def metric_defs() -> list[dict]:
     return [
         {"key": m["key"], "label": m["label"], "fmt": m["fmt"],
          "description": m["description"], "group": "Things to Track",
-         "default_on": True}
+         "default_on": m["default_on"]}
         for m in REGISTRY.values()
     ] + range_defs()
 
@@ -246,3 +248,109 @@ def day_high_time(daily, intraday):
         description="Clock time of the latest session's low (exchange timezone)")
 def day_low_time(daily, intraday):
     return _session_time_of(intraday, "Low", find_max=False)
+
+
+# --- Pattern metrics -------------------------------------------------------
+# Default-off columns describing how a stock's up/down days are arranged over
+# the window, rather than how far it moved. All are derived from the same
+# close-over-previous-close changes as green_days/red_days, so the window's
+# first bar is the reference and never scores.
+
+BIG_MOVE_PCT = 3.0   # |close-over-prev-close| that counts as a "big move" day
+GAP_PCT = 1.0        # |open vs prev close| that counts as a gap
+
+
+def _signed_runs(changes: pd.Series) -> list[int]:
+    """Consecutive same-direction runs as signed lengths (+3 = three straight
+    green closes). A flat day belongs to no run and ends whichever run
+    preceded it."""
+    runs: list[int] = []
+    extending = False
+    for change in changes:
+        direction = 1 if change > 0 else -1 if change < 0 else 0
+        if direction == 0:
+            extending = False
+            continue
+        if extending and (runs[-1] > 0) == (direction > 0):
+            runs[-1] += direction
+        else:
+            runs.append(direction)
+            extending = True
+    return runs
+
+
+@metric("streak", "Streak", fmt="int", default_on=False,
+        description="Current run of consecutive green (+) or red (−) closes; "
+                    "0 when the latest day was flat")
+def streak(daily, intraday):
+    changes = _day_changes(daily)
+    if changes is None or changes.empty:
+        return None
+    runs = _signed_runs(changes)
+    if not runs:
+        return 0
+    # A trailing flat day breaks the run, so only report the last run when it
+    # actually reaches the final day.
+    return int(runs[-1]) if changes.iloc[-1] != 0 else 0
+
+
+@metric("max_green_streak", "Max Green Run", fmt="int", default_on=False,
+        description="Longest run of consecutive green closes within the selected period")
+def max_green_streak(daily, intraday):
+    changes = _day_changes(daily)
+    if changes is None or changes.empty:
+        return None
+    greens = [r for r in _signed_runs(changes) if r > 0]
+    return int(max(greens)) if greens else 0
+
+
+@metric("max_red_streak", "Max Red Run", fmt="int", default_on=False,
+        description="Longest run of consecutive red closes within the selected period")
+def max_red_streak(daily, intraday):
+    changes = _day_changes(daily)
+    if changes is None or changes.empty:
+        return None
+    reds = [-r for r in _signed_runs(changes) if r < 0]
+    return int(max(reds)) if reds else 0
+
+
+@metric("green_ratio", "Green Day %", fmt="pct_abs", default_on=False,
+        description="Share of the period's trading days that closed green "
+                    "(flat days count in the total)")
+def green_ratio(daily, intraday):
+    changes = _day_changes(daily)
+    if changes is None or changes.empty:
+        return None
+    return round(float((changes > 0).sum()) / len(changes) * 100, 2)
+
+
+@metric("days_since_big_move", "Days Since ±3% Day", fmt="int", default_on=False,
+        description="Trading days since the last close that moved 3% or more from "
+                    "the prior close; blank when the period has none")
+def days_since_big_move(daily, intraday):
+    if daily is None or len(daily) < 2:
+        return None
+    prev_close = daily["Close"].shift(1)
+    pct = ((daily["Close"] - prev_close) / prev_close * 100)
+    pct = pct.replace([np.inf, -np.inf], np.nan).dropna()
+    if pct.empty:
+        return None
+    big = pct[pct.abs() >= BIG_MOVE_PCT]
+    if big.empty:
+        return None
+    # 0 = it happened on the most recent day in the window.
+    return int(len(pct) - 1 - pct.index.get_loc(big.index[-1]))
+
+
+@metric("gap_frequency", "Gaps ≥1%", fmt="int", default_on=False,
+        description="Days that opened 1% or more away from the prior close, "
+                    "in either direction, within the selected period")
+def gap_frequency(daily, intraday):
+    if daily is None or len(daily) < 2 or "Open" not in daily:
+        return None
+    prev_close = daily["Close"].shift(1)
+    gaps = ((daily["Open"] - prev_close) / prev_close * 100).dropna()
+    gaps = gaps.replace([np.inf, -np.inf], np.nan).dropna()
+    if gaps.empty:
+        return None
+    return int((gaps.abs() >= GAP_PCT).sum())

@@ -190,12 +190,123 @@ def test_metric_defs_expose_every_column_to_the_picker():
     defs = metrics.metric_defs()
     keys = {d["key"] for d in defs}
     assert {"green_days", "red_days", "day_high_time", "day_low_time"} <= keys
+    assert {"streak", "green_ratio", "gap_frequency"} <= keys
     # 11 relationships x 5 aggregates
     assert len([k for k in keys if k.startswith("rs:")]) == 55
-    registered = [d for d in defs if not d["key"].startswith("rs:")]
-    assert all(d["default_on"] for d in registered), "Things to Track default visible"
     assert all(not d["default_on"] for d in defs if d["key"].startswith("rs:")), \
         "the 55 range columns stay off until the user opts in"
+
+
+def test_metric_defs_respect_each_metrics_default_visibility():
+    """The original four Things-to-Track columns ship visible; every opt-in
+    column (the pattern metrics and the range stats) ships hidden."""
+    by_key = {d["key"]: d for d in metrics.metric_defs()}
+    for key in ("green_days", "red_days", "day_high_time", "day_low_time"):
+        assert by_key[key]["default_on"] is True, f"{key} is a headline column"
+    for key in ("streak", "max_green_streak", "max_red_streak", "green_ratio",
+                "days_since_big_move", "gap_frequency"):
+        assert by_key[key]["default_on"] is False, f"{key} must stay opt-in"
+
+
+# --------------------------------------------------------------------------
+# pattern metrics — how the up/down days are arranged, not how far they moved
+# --------------------------------------------------------------------------
+
+def make_closes(closes: list[float], opens: list[float] | None = None):
+    """Daily frame from closes alone (opens default to the same value, so no
+    gaps); high/low are widened so they never constrain these metrics."""
+    opens = opens if opens is not None else closes
+    return make_daily([(o, max(o, c) + 1, min(o, c) - 1, c)
+                       for o, c in zip(opens, closes, strict=True)])
+
+
+def test_streak_counts_the_current_run_with_a_sign():
+    # changes:            +2   +1   +3   → three straight green closes
+    df = make_closes([100.0, 102.0, 103.0, 106.0])
+    assert metrics.streak(df, None) == 3
+
+    # changes:            -2   -1        → two straight red closes
+    df = make_closes([100.0, 98.0, 97.0])
+    assert metrics.streak(df, None) == -2
+
+
+def test_streak_reports_only_the_run_that_reaches_the_latest_day():
+    # changes:            +2    +1    -4  → the green run ended; today is red
+    df = make_closes([100.0, 102.0, 103.0, 99.0])
+    assert metrics.streak(df, None) == -1
+
+
+def test_a_flat_close_breaks_the_streak():
+    """A day that closes exactly unchanged is neither green nor red, so it
+    ends the run rather than extending it."""
+    df = make_closes([100.0, 102.0, 104.0, 104.0])
+    assert metrics.streak(df, None) == 0, "the latest day was flat"
+
+    # The run before the flat day does not carry across it either.
+    df = make_closes([100.0, 102.0, 104.0, 104.0, 106.0])
+    assert metrics.streak(df, None) == 1, "only the day after the flat one counts"
+
+
+def test_max_runs_find_the_longest_stretch_in_the_window():
+    # changes:  +1  +1  +1  -1  -1  +1   → longest green 3, longest red 2
+    df = make_closes([100.0, 101.0, 102.0, 103.0, 102.0, 101.0, 102.0])
+    assert metrics.max_green_streak(df, None) == 3
+    assert metrics.max_red_streak(df, None) == 2
+
+
+def test_max_runs_are_zero_when_a_direction_never_happens():
+    df = make_closes([100.0, 101.0, 102.0])   # all green
+    assert metrics.max_green_streak(df, None) == 2
+    assert metrics.max_red_streak(df, None) == 0, "no red day is 0, not None"
+
+
+def test_green_ratio_is_green_days_over_all_scored_days():
+    # 4 scored days: up, down, flat, up → 2 green of 4 = 50%
+    df = make_closes([100.0, 101.0, 100.0, 100.0, 101.0])
+    assert metrics.green_ratio(df, None) == pytest.approx(50.0)
+
+
+def test_green_ratio_counts_flat_days_in_the_denominator():
+    """Otherwise a stock that barely trades would report a misleading 100%."""
+    # 3 scored days: up, flat, flat → 1 of 3
+    df = make_closes([100.0, 101.0, 101.0, 101.0])
+    assert metrics.green_ratio(df, None) == pytest.approx(33.33, abs=0.01)
+
+
+def test_days_since_big_move_counts_back_from_the_latest_day():
+    # changes: +5% (big), +0.95%, +0.94%  → the big move was 2 days ago
+    df = make_closes([100.0, 105.0, 106.0, 107.0])
+    assert metrics.days_since_big_move(df, None) == 2
+
+
+def test_days_since_big_move_is_zero_on_the_day_it_happens():
+    df = make_closes([100.0, 100.5, 110.0])
+    assert metrics.days_since_big_move(df, None) == 0
+
+
+def test_days_since_big_move_is_blank_when_the_window_has_none():
+    """Blank means "not in this window" — reporting a number would imply a
+    move that the data doesn't contain."""
+    df = make_closes([100.0, 100.5, 101.0, 100.8])
+    assert metrics.days_since_big_move(df, None) is None
+
+
+def test_gap_frequency_counts_opens_away_from_the_prior_close():
+    # opens vs prior close: 100→102 (+2%, gap), 101→101.2 (+0.2%, no),
+    #                       100→98 (−2%, gap counts in either direction)
+    df = make_closes(
+        closes=[100.0, 101.0, 100.0, 99.0],
+        opens=[100.0, 102.0, 101.2, 98.0],
+    )
+    assert metrics.gap_frequency(df, None) == 2
+
+
+def test_pattern_metrics_need_at_least_two_bars():
+    one_bar = make_closes([100.0])
+    for fn in (metrics.streak, metrics.max_green_streak, metrics.green_ratio,
+               metrics.days_since_big_move, metrics.gap_frequency):
+        assert fn(one_bar, None) is None, f"{fn.__name__} needs a prior close"
+        assert fn(None, None) is None, f"{fn.__name__} handles a missing frame"
 
 
 # --------------------------------------------------------------------------
