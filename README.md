@@ -3,7 +3,7 @@
 A local, free, self-hosted stock-tracking dashboard. Add the tickers you care about,
 group them into **sectors**, and read the whole market at a glance — with a period
 selector (1D / 5D / 1M / 3M / YTD / 1Y) that recomputes every column, plus pluggable
-**"Things to Track"** analytics columns (green/red day counts, time of the day's
+**"Things to Track"** analytics columns (green/red day counts, streaks, time of the day's
 high/low, and anything you add next).
 
 Price data comes from Yahoo Finance via [yfinance](https://github.com/ranaroussi/yfinance) —
@@ -157,11 +157,21 @@ fade off the high, and so on. All 55 statistics are also available as
 toggleable main-table columns via the "Things to Track" picker (off by
 default), so any of them can be compared across the whole portfolio.
 
+### Pattern statistics
+
+Alongside the range statistics, a second family describes how a stock's up and
+down days are *arranged* rather than how far it moved — current streak (signed,
+so −4 is four straight red closes), longest green and red runs, the share of
+days that closed green, trading days since the last ±3% move, and the count of
+1%+ opening gaps. These ship off by default in the same picker, and like every
+numeric column they can be filtered in the All view and used as alert
+conditions.
+
 ## Decision-support tools (descriptive only — never advice)
 
-Two pages turn the range statistics into context. By design, neither produces
-buy/sell/hold output, signals, or position advice — they compute history and
-context; decisions stay with you.
+Three pages turn the range statistics into context. By design, none of them
+produces buy/sell/hold output, signals, or position advice — they compute
+history and context; decisions stay with you.
 
 - **⌁ Backtest** (`#/backtest`): define a rule in the stats vocabulary —
   entry at a % or σ dip below the previous close, optional second tranche,
@@ -178,8 +188,20 @@ context; decisions stay with you.
   z-scores against its own trailing 63-day distribution (day change, dip,
   stretch, range). ±2σ days light up. It describes how unusual today is —
   nothing more.
+- **⚑ Alerts** (`#/alerts`): conditions **you** write over any statistic the
+  app already tracks — pick a stock (or *any stock*, screener-style), a
+  timeframe, a statistic, a direction and a threshold. The page reports which
+  conditions currently hold and the observed value behind each; a topbar badge
+  carries the count. Nothing fires on its own and nothing is ever suggested:
+  the app states what a statistic reads, and what that means is your call.
 
-Both pages carry their assumptions in the UI. Historical simulation is not
+  Two design rules keep the reporting honest. A statistic that can't be
+  computed for a stock is listed as **unavailable** rather than silently
+  counted as "not met", so an empty result always means one specific thing;
+  and an unknown statistic is refused when the rule is created, so a typo
+  can't become a rule that quietly never matches.
+
+All three pages carry their assumptions in the UI. Historical simulation is not
 prediction; past results do not transfer to the future.
 
 ## Adding a new "Thing to Track"
@@ -207,6 +229,8 @@ def range_pct(daily, intraday):
 | `GET /api/sectors/{id}/note` | The sector's vault note (404 when none) |
 | `GET /api/db` · `GET /api/db/prices/{ticker}?period=1Y` | Read-only DB dump + raw daily OHLCV bars |
 | `POST /api/backtest` · `GET /api/deviations` | Rule simulation over history · today-vs-typical z-scores |
+| `GET /api/alerts` | Saved conditions, which currently hold, and the alertable statistic list |
+| `POST /api/alerts` · `PATCH /api/alerts/{id}` · `DELETE /api/alerts/{id}` | Create a condition · pause/resume · remove |
 | `POST /api/stocks` | Track a ticker (`{ticker, sector_id}` or `{ticker, new_sector_name}`) |
 | `PATCH /api/stocks/{id}` | Move a stock to another sector |
 | `DELETE /api/stocks/{id}` | Stop tracking |
@@ -231,10 +255,16 @@ def range_pct(daily, intraday):
   fact-checking, provenance-linked knowledge routing, per-source price-impact
   tracking, and read-only API/UI integration — deliberately RAG-free at this
   scale
-- Established a **148-test behavior suite and CI pipeline** (GitHub Actions:
+- Established a **199-test behavior suite and CI pipeline** (GitHub Actions:
   lint, backend, frontend) covering the HTTP contract, concurrency, and
   financial-simulation correctness — with every invariant verified to fail
   against deliberately broken code before being trusted as a gate
+- Designed a **user-defined rule engine** evaluating threshold conditions over
+  70+ computed statistics, with screener-style rules that fan out across the
+  whole portfolio, per-timeframe query batching so N rules cost one upstream
+  fetch per window, and unmeasurable inputs surfaced explicitly rather than
+  collapsed into a false negative — cross-validated against the browser-side
+  filter implementation by a subprocess parity test
 - Hardened a **thread-safe TTL cache** by scoping locks per cache slot so a slow
   upstream fetch can no longer stall unrelated reads, with regression tests that
   assert concurrent fetches overlap rather than serialize
