@@ -268,40 +268,6 @@ def range_pct(daily, intraday):
 | `DELETE /api/stocks/{id}` | Stop tracking |
 | `GET /api/sectors` · `DELETE /api/sectors/{id}` | List sectors · delete an empty sector |
 
-## Highlights
-
-- Designed and built a full-stack market-tracking dashboard: **FastAPI** REST API +
-  dependency-free vanilla-JS single-page UI with a dark, density-first table design
-- Engineered a **TTL-cached batch data layer** over the Yahoo Finance API (yfinance)
-  that collapses N tickers × M metrics into two batched requests, with stale-cache
-  fallback for upstream outages
-- Built a **pluggable metrics registry** — new analytics columns are single
-  decorated Python functions that flow through to a dynamic, user-toggleable UI
-  column picker with persisted preferences
-- Implemented **SQLite persistence** with validated CRUD endpoints and
-  graceful degradation for delisted tickers and partial price history
-- Synthesized live intraday bars into daily windows so current prices stay
-  real-time during market hours despite upstream daily-feed lag
-- Built a **file-based LLM-maintained knowledge system** (Karpathy LLM-wiki
-  pattern) over an Obsidian vault: article ingestion with automated
-  fact-checking, provenance-linked knowledge routing, per-source price-impact
-  tracking, and read-only API/UI integration — deliberately RAG-free at this
-  scale
-- Established a **265-test behavior suite and CI pipeline** (GitHub Actions:
-  lint, backend, frontend) covering the HTTP contract, concurrency, and
-  financial-simulation correctness — with every invariant verified to fail
-  against deliberately broken code before being trusted as a gate
-- Designed a **user-defined rule engine** evaluating threshold conditions over
-  120+ computed statistics — including calendar and sequence patterns that
-  flag only differences beyond a multiple-comparison-corrected noise band, after
-  measuring that most weekday "effects" in the portfolio were chance — with
-  screener-style rules that fan out across the whole portfolio, per-window
-  query batching, and unmeasurable inputs surfaced explicitly rather than
-  collapsed into a false negative
-- Hardened a **thread-safe TTL cache** by scoping locks per cache slot so a slow
-  upstream fetch can no longer stall unrelated reads, with regression tests that
-  assert concurrent fetches overlap rather than serialize
-
 ## Limitations
 
 - Quotes are Yahoo's (15–20 min delayed for some exchanges); this is a tracker,
@@ -309,6 +275,33 @@ def range_pct(daily, intraday):
 - Prices are displayed in the listing currency with a `$` prefix — non-USD
   listings (e.g. `.TO` tickers) aren't currency-converted
 - Single-user by design: the cache is in-process and the DB is a local file
+
+## Experience Gained
+
+- Built a full-stack market dashboard — a FastAPI API (18 endpoints) and a
+  dependency-free vanilla-JS single-page UI over SQLite — tracking 37 stocks across
+  11 sectors, with validated CRUD and graceful degradation for delisted tickers and
+  partial history
+- Engineered a cached batch data layer over Yahoo Finance that serves all 37 tickers
+  in one request per window, with per-slot locks so a slow fetch never stalls other
+  reads, stale-cache fallback during outages, and live 1-minute bars folded into
+  daily windows
+- Built a pluggable metrics registry: each of the 65 analytics columns is a single
+  decorated Python function that appears in the UI's column picker with no frontend
+  change
+- Designed a user-defined alert engine over 124 computed statistics, including
+  calendar and sequence patterns that flag a difference only past a
+  multiple-comparison-corrected band (|z| ≥ 2.6) — after measuring that most weekday
+  "effects" in the portfolio were chance (6–10 of 185 cells vs ~8 expected)
+- Built a historical rule backtester with 7 honesty invariants (no look-ahead,
+  range-checked fills, gaps filled at the open, stop assumed before target, …) pinned
+  by hand-computed fixtures
+- Built a file-based, LLM-maintained knowledge base (Karpathy LLM-wiki pattern) over
+  an Obsidian vault — 64 stock notes, 12 sector notes and 21 fact-checked articles
+  with per-source price-impact tracking — read by the app without RAG
+- Established a 265-test behavior suite (232 pytest + 33 node) running in GitHub
+  Actions on every push and pull request, with each invariant proven to fail against
+  deliberately broken code before it is trusted as a gate
 
 ## License
 

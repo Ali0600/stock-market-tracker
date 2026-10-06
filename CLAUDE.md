@@ -37,8 +37,10 @@
 - Lint config lives in `pyproject.toml` and deliberately selects the correctness families (`F`, `E4/E7/E9`, `B`, `I`) rather than the style-modernization ones — the codebase consistently uses `Optional[...]`, and churning that would bury real findings.
 
 ## Workflow
-- Commit each verified change as you go (owner preference). Descriptive messages, author = owner only — never a Claude co-author trailer. The repo is destined for public GitHub: run the leak check (no `data/`, `venv/`, `.claude/settings.local.json`, secrets, or absolute personal paths) before commits that add files.
+- Commit each verified change as you go (owner preference). Descriptive messages, author = owner only — never a Claude co-author trailer. The repo is PUBLIC (github.com/Ali0600/stock-market-tracker): run the leak check (no `data/`, `venv/`, `.claude/settings.local.json`, secrets, or absolute personal paths) before commits that add files.
+- App/test/CI changes: branch → PR → merge on green CI (squash). Docs and agent notes go straight to `main`. Before branching, check `git rev-list --count origin/main..HEAD` is 0 — local `main` once sat 11 commits ahead for two months, and a branch cut from it would have swept them into an unrelated PR.
 - Port 8000 is often taken by another local app — verify on a free port (e.g. 8010) rather than killing whatever holds it.
 
 ## Verifying UI changes
-- The Claude Preview panel cannot start servers from this folder (see global CLAUDE.md → machine notes). Run the server with Bash and screenshot with headless Chrome instead.
+- The Claude Preview panel cannot start servers from this folder (macOS folder protection). Run the server with Bash (`venv/bin/python -m uvicorn app.main:app --port 8010`), then either open it in the **built-in browser** (`navigate` to `http://127.0.0.1:8010/...` works and allows clicks, form input and JS inspection — verified 2026-10-06) or screenshot it with headless Chrome. Headless Chrome with `--virtual-time-budget` can write the PNG and then hang: run each capture in the background, wait for the file, then kill the process — never chain captures with `;`.
+- The detail dialog scrolls inside `#detailModal`, not the page — set `detailModal.scrollTop` to reach sections below the fold.
