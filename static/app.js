@@ -378,7 +378,11 @@ document.querySelectorAll("#groupCtl button").forEach((btn) => {
   });
 });
 
-$("refreshBtn").addEventListener("click", () => load(true));
+$("refreshBtn").addEventListener("click", () => {
+  patternCache.clear();
+  ptState.data = null;
+  load(true);
+});
 
 $("colsBtn").addEventListener("click", (e) => {
   e.stopPropagation();
@@ -762,12 +766,121 @@ async function openDetail(ticker, period) {
     <section class="detail-section">${chartSVG(d.chart)}</section>
     <section class="detail-section"><h3>Key Stats</h3>${statsGrid(d.stats)}</section>
     ${rangeMatrix(d.range)}
+    <section class="detail-section" id="detailPatterns">
+      <h3>Patterns · 2Y</h3><p class="muted">Computing patterns…</p>
+    </section>
     ${newsList(d.news)}
     ${vaultHtml(d.vault)}
     <section class="detail-section">
       <h3>AI Analysis</h3>
       <div class="analysis">${analysis}</div>
     </section>`;
+  loadDetailPatterns(d.ticker);
+}
+
+/* ---------- pattern statistics (detail view + Patterns page) ---------- */
+
+// ticker -> /patterns payload. The stats only move when a session completes,
+// so timeframe chips reuse it; Refresh clears it. Failures are never cached.
+const patternCache = new Map();
+
+function ptCell(cell, fmt) {
+  const cls = patternCellClass(cell);
+  const title = escapeHtml(patternCellTitle(cell));
+  if (!cell || cell.value == null) return `<td class="${cls}" title="${title}">—</td>`;
+  const text = fmt === "chip" ? pctChip(cell.value) : escapeHtml(fmtPatternValue(cell.value, fmt));
+  return `<td class="${cls}" title="${title}">${text}</td>`;
+}
+
+function ptTable(title, family, markKey, markLabel) {
+  const head = family.metrics.map((m) => `<th>${escapeHtml(m.label)}</th>`).join("");
+  const row = (r, cls = "") => `
+    <tr class="${cls}">
+      <th>${escapeHtml(r.label)}${r.key === markKey
+        ? ` <span class="pt-mark">${escapeHtml(markLabel)}</span>` : ""}</th>
+      <td class="muted">${r.n}</td>
+      ${family.metrics.map((m) => ptCell(r.cells[m.key], m.fmt)).join("")}
+    </tr>`;
+  const rows = family.rows.map((r) => row(r)).join("") + (family.all ? row(family.all, "pt-all") : "");
+  return `
+    <h4 class="pt-sub">${escapeHtml(title)}</h4>
+    <div class="db-scroll"><table class="range-matrix pt-table">
+      <thead><tr><th></th><th>Days</th>${head}</tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>`;
+}
+
+function ptStrip(label, shares, intra) {
+  const peak = Math.max(...shares);
+  const spoken = shares.map((v, i) => `${intra.buckets[i]} ${v}%`).join(", ");
+  const cols = shares.map((v, i) => {
+    const h = peak > 0 ? (v / peak) * 100 : 0;
+    const tag = peak > 0 && v === peak
+      ? `<span class="pt-peak" style="bottom:${h.toFixed(1)}%">${v.toFixed(0)}%</span>` : "";
+    return `<div class="pt-col" title="${escapeHtml(bucketRange(intra.buckets, i))}: ${v}% of ${intra.n} sessions">
+      ${tag}<div class="pt-bar" style="height:${h.toFixed(1)}%"></div></div>`;
+  }).join("");
+  return `
+    <div class="pt-strip-row">
+      <div class="pt-strip-label">${escapeHtml(label)}</div>
+      <div class="pt-strip-plot">
+        <div class="pt-strip" role="img" aria-label="${escapeHtml(`${label} by half hour: ${spoken}`)}">${cols}</div>
+        <div class="pt-axis"><span>09:30</span><span>12:45</span><span>16:00</span></div>
+      </div>
+    </div>`;
+}
+
+function ptIntraday(intra) {
+  if (!intra) {
+    return '<h4 class="pt-sub">Time of day</h4><p class="muted">No five-minute history for this stock.</p>';
+  }
+  const s = Object.fromEntries(intra.summary.map((x) => [x.key, x.value]));
+  return `
+    <h4 class="pt-sub">Time of day <span class="muted">— last ${intra.n} completed sessions${
+      intra.thin ? ", too few to read much into" : ""}</span></h4>
+    <div class="${intra.thin ? "pt-thin" : ""}">
+      ${ptStrip("Day's high", intra.high, intra)}
+      ${ptStrip("Day's low", intra.low, intra)}
+    </div>
+    <p class="pt-note">The first half hour held the day's high in ${fmtPatternValue(s.first30_high, "rate")}
+      of these sessions and the low in ${fmtPatternValue(s.first30_low, "rate")}; the last half hour,
+      ${fmtPatternValue(s.last30_high, "rate")} and ${fmtPatternValue(s.last30_low, "rate")}.</p>`;
+}
+
+function patternsSection(data) {
+  if (!data || data.error || !data.profile) {
+    return `<h3>Patterns · 2Y</h3><p class="muted">${escapeHtml((data && data.error) || "Not enough price history")}</p>`;
+  }
+  const p = data.profile;
+  return `
+    <h3>Patterns · ${escapeHtml(data.lookback)} <span class="muted">— ${p.sessions} completed
+      sessions, ${escapeHtml(p.first_session)} to ${escapeHtml(p.last_session)}</span></h3>
+    ${ptTable("By weekday", p.weekday, p.today.weekday, "this session")}
+    ${ptTable("The next day", p.follow_through, p.today.last_direction, "last session")}
+    ${ptTable("Opening gaps", p.gaps, null, "")}
+    ${ptTable("Turn of the month", p.turn_of_month, p.today.month_window, "this session")}
+    ${ptIntraday(p.intraday)}
+    <p class="analysis-meta">Completed sessions only — history, not a forecast. Each number rests on
+      the days shown beside it (hover for detail). A highlighted cell differs from this stock's
+      other days by more than normal variation; most weekday differences don't. Dimmed cells rest
+      on fewer than 10 days.</p>`;
+}
+
+async function loadDetailPatterns(ticker) {
+  let data = patternCache.get(ticker);
+  if (!data) {
+    try {
+      const res = await fetch(`/api/stocks/${ticker}/patterns`);
+      if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+      data = await res.json();
+      patternCache.set(ticker, data);
+    } catch (err) {
+      data = { error: `Couldn't load patterns: ${err.message}` };
+    }
+  }
+  const slot = $("detailPatterns");
+  if (!slot || detailTicker !== ticker || !detailModal.open) return;   // user moved on
+  slot.innerHTML = patternsSection(data);
 }
 
 async function openSectorNote(sectorId) {
@@ -821,7 +934,7 @@ function fmtAge(seconds) {
   return seconds < 90 ? `${seconds}s` : `${Math.round(seconds / 60)}m`;
 }
 
-const PAGE_VIEWS = ["dbView", "btView", "devView", "alView"];
+const PAGE_VIEWS = ["dbView", "btView", "devView", "alView", "ptView"];
 
 function showPage(sectionId) {
   document.body.classList.add("db-mode");
@@ -1045,6 +1158,7 @@ $("dbBtn").addEventListener("click", () => { location.hash = "#/db"; });
 $("btBtn").addEventListener("click", () => { location.hash = "#/backtest"; });
 $("devBtn").addEventListener("click", () => { location.hash = "#/deviations"; });
 $("alBtn").addEventListener("click", () => { location.hash = "#/alerts"; });
+$("ptBtn").addEventListener("click", () => { location.hash = "#/patterns"; });
 
 /* ---------- backtest page (historical simulation — descriptive only) ---------- */
 
@@ -1378,7 +1492,10 @@ function alRuleCard(rule) {
   const observed = rule.matches
     .map((m) => `<span class="al-hit" data-goto-stock="${escapeHtml(m.ticker)}"
                    title="Open ${escapeHtml(m.ticker)}">${escapeHtml(m.ticker)}
-                   <b>${m.observed}</b></span>`).join("");
+                   <b>${m.observed}</b>${
+                     m.stands_out === true ? '<small class="al-flag out">stands out</small>'
+                     : m.stands_out === false ? '<small class="al-flag">typical range</small>'
+                     : ""}</span>`).join("");
   const stateChip = {
     met: `<span class="al-state met">condition met</span>`,
     unmet: `<span class="al-state unmet">not met</span>`,
@@ -1440,7 +1557,7 @@ function renderAlView() {
           ${tickers.map((t) => `<option value="${t}">${t}</option>`).join("")}
         </select>
       </label>
-      <label class="bt-field">Timeframe
+      <label class="bt-field">Timeframe <span class="al-window" id="alWindow"></span>
         <select id="alPeriod">${PERIODS.map((p) =>
           `<option value="${p}" ${p === "3M" ? "selected" : ""}>${p}</option>`).join("")}
         </select>
@@ -1474,6 +1591,15 @@ function renderAlView() {
 
   $("alBack").addEventListener("click", () => { location.hash = ""; });
   $("alAdd").addEventListener("click", addAlert);
+  $("alStat").addEventListener("change", syncAlWindow);
+  syncAlWindow();
+}
+
+function syncAlWindow() {
+  const key = $("alStat").value;
+  const fixed = key.startsWith("s:") || key.startsWith("z:");
+  $("alPeriod").disabled = fixed;
+  $("alWindow").textContent = fixed ? `· ${ruleWindowLabel({ metric_key: key })}` : "";
 }
 
 async function addAlert() {
@@ -1543,6 +1669,214 @@ $("alView").addEventListener("click", async (e) => {
   }
 });
 
+/* ---------- patterns page (portfolio — descriptive only) ---------- */
+
+const PT_FAMILIES = [
+  { key: "weekday", label: "Weekday" },
+  { key: "follow_through", label: "Next day" },
+  { key: "gaps", label: "Gaps" },
+  { key: "turn_of_month", label: "Turn of month" },
+  { key: "intraday", label: "Time of day" },
+];
+const PT_INTRADAY_STATS = [
+  { key: "high", label: "Where the day's high was set", fmt: "rate" },
+  { key: "low", label: "Where the day's low was set", fmt: "rate" },
+];
+const PT_SHORT = {
+  all: "All days", after_green: "After green", after_red: "After red",
+  after_rise3: "After ≥3% up", after_drop3: "After ≥3% down", after_red3: "After 3 red",
+  up: "Gap up", down: "Gap down", first3: "First 3", middle: "Middle", last3: "Last 3",
+};
+
+function loadPtPrefs() {
+  try {
+    const saved = JSON.parse(localStorage.getItem("mt.patterns") || "null");
+    if (saved && PT_FAMILIES.some((f) => f.key === saved.family) && typeof saved.stat === "string") {
+      return { family: saved.family, stat: saved.stat };
+    }
+  } catch { /* corrupted storage — start fresh */ }
+  return { family: "weekday", stat: "green_rate" };
+}
+
+const ptState = { data: null, error: "", sort: { key: "ticker", dir: 1 }, ...loadPtPrefs() };
+
+function savePtPrefs() {
+  try {
+    localStorage.setItem("mt.patterns", JSON.stringify({ family: ptState.family, stat: ptState.stat }));
+  } catch { /* storage unavailable — the choice just won't persist */ }
+}
+
+async function enterPtView() {
+  showPage("ptView");
+  if (!ptState.data) {
+    $("ptView").innerHTML =
+      '<p class="muted db-loading">Computing patterns over two years of sessions…</p>';
+    try {
+      const res = await fetch("/api/patterns");
+      if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+      ptState.data = await res.json();
+      ptState.error = "";
+    } catch (err) {
+      ptState.error = err.message;
+    }
+  }
+  if (location.hash === "#/patterns") renderPtView();
+}
+
+function ptColumns(fam, sample) {
+  if (fam === "intraday") {
+    return sample.intraday.buckets.map((label, i) => ({
+      key: String(i), label, index: i, range: bucketRange(sample.intraday.buckets, i),
+    }));
+  }
+  const f = sample[fam];
+  return [...f.rows, ...(f.all ? [f.all] : [])]
+    .map((r) => ({ key: r.key, label: PT_SHORT[r.key] || r.label }));
+}
+
+function ptCellOf(profile, fam, stat, col) {
+  if (!profile) return null;
+  if (fam === "intraday") {
+    const intra = profile.intraday;
+    if (!intra) return null;
+    return { value: intra[stat][col.index], n: intra.n, z: null, stands_out: false, thin: intra.thin };
+  }
+  const f = profile[fam];
+  const row = col.key === "all" ? f.all : f.rows.find((r) => r.key === col.key);
+  return row ? row.cells[stat] : null;
+}
+
+function ptHeatCell(cell, ticker, col, max) {
+  if (!cell || cell.value == null) return '<td class="pt-empty">—</td>';
+  const title = escapeHtml(`${ticker} · ${col.range}: ${cell.value}% of ${cell.n} sessions`);
+  // Too few sessions: no shading, so the colour never overstates a thin read.
+  const shade = cell.thin ? "" : ` style="background:rgba(91,140,255,${heatAlpha(cell.value, max)})"`;
+  return `<td class="pt-heat${cell.thin ? " pt-thin" : ""}"${shade} title="${title}">${cell.value.toFixed(0)}</td>`;
+}
+
+function renderPtView() {
+  const view = $("ptView");
+  const d = ptState.data;
+  if (!d) {
+    view.innerHTML = `<p class="form-error db-loading">Failed to load patterns: ${escapeHtml(ptState.error)}</p>`;
+    return;
+  }
+  const fam = ptState.family;
+  const sample = d.stocks.map((s) => s.profile).find((p) => p && (fam !== "intraday" || p.intraday));
+  const stats = !sample ? [] : fam === "intraday" ? PT_INTRADAY_STATS : sample[fam].metrics;
+  if (stats.length && !stats.some((s) => s.key === ptState.stat)) ptState.stat = stats[0].key;
+  savePtPrefs();
+  const stat = stats.find((s) => s.key === ptState.stat);
+
+  const familyBtns = PT_FAMILIES.map((f) =>
+    `<button class="${f.key === fam ? "active" : ""}" data-pt-family="${f.key}">${escapeHtml(f.label)}</button>`).join("");
+  const statSelect = stats.length ? `
+    <label class="bt-field">Statistic
+      <select id="ptStat">${stats.map((s) =>
+        `<option value="${escapeHtml(s.key)}" ${s.key === ptState.stat ? "selected" : ""}>${escapeHtml(s.label)}</option>`).join("")}
+      </select>
+    </label>` : "";
+  const head = `
+    <div class="db-head">
+      <h2>Patterns <span class="muted">· ${escapeHtml(d.lookback)} of completed sessions${d.stale ? " · cached" : ""}</span></h2>
+      <button class="btn" id="ptBack" style="margin-left:auto">← Dashboard</button>
+    </div>
+    <div class="pt-controls">
+      <div class="segmented" role="tablist" aria-label="Pattern family">${familyBtns}</div>
+      ${statSelect}
+    </div>`;
+  if (!sample) {
+    view.innerHTML = `${head}<p class="muted">No stock has enough history for this view yet.</p>`;
+    return;
+  }
+
+  const cols = ptColumns(fam, sample);
+  const rows = d.stocks.map((stock) => ({
+    stock, cells: cols.map((c) => ptCellOf(stock.profile, fam, stat.key, c)),
+  }));
+  const { key, dir } = ptState.sort;
+  const colIdx = cols.findIndex((c) => c.key === key);
+  rows.sort((a, b) => {
+    if (colIdx < 0) return a.stock.ticker.localeCompare(b.stock.ticker) * dir;
+    const va = a.cells[colIdx]?.value, vb = b.cells[colIdx]?.value;
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;                 // stocks without a value sink either way
+    if (vb == null) return -1;
+    return (va - vb) * dir;
+  });
+
+  const max = fam === "intraday"
+    ? Math.max(0, ...rows.flatMap((r) => r.cells.filter((c) => c && !c.thin).map((c) => c.value || 0)))
+    : 0;
+  let note;
+  if (fam === "intraday") {
+    note = `Share of the last ${sample.intraday.n} completed sessions whose ${
+      stat.key === "high" ? "high" : "low"} fell in each half hour — darker means more sessions.
+      Highs and lows bunch at the open and close in most stocks, so nothing is highlighted.`;
+  } else if (fam === "gaps") {
+    note = "Gaps have no comparison baseline, so nothing is highlighted. Hover a cell for its sample size.";
+  } else {
+    const tested = rows.flatMap((r) => r.cells).filter((c) => c && c.z != null);
+    const out = tested.filter((c) => c.stands_out).length;
+    note = `<b>${out} of ${tested.length}</b> cells stand out from their stock's other days;
+      chance alone would flag about ${chanceExpected(tested.length, d.stands_out_z).toFixed(1)}.
+      Dimmed cells rest on fewer than ${d.min_n} days. Hover a cell for its sample size.`;
+  }
+
+  const th = (k, label) => {
+    const arrow = key === k ? `<span class="arrow">${dir > 0 ? "▲" : "▼"}</span>` : "";
+    return `<th class="sortable" data-pt-sort="${escapeHtml(k)}">${escapeHtml(label)} ${arrow}</th>`;
+  };
+  const body = rows.map(({ stock, cells }) => {
+    const tick = `<td class="db-tick" data-goto-stock="${escapeHtml(stock.ticker)}">${escapeHtml(stock.ticker)}
+      <div class="tick-name">${escapeHtml(stock.sector)}</div></td>`;
+    if (!stock.profile) {
+      return `<tr>${tick}<td colspan="${cols.length}" class="muted">${escapeHtml(stock.error || "No history")}</td></tr>`;
+    }
+    const tds = cells.map((cell, i) => (fam === "intraday"
+      ? ptHeatCell(cell, stock.ticker, cols[i], max) : ptCell(cell, stat.fmt))).join("");
+    return `<tr>${tick}${tds}</tr>`;
+  }).join("");
+
+  view.innerHTML = `${head}
+    <p class="muted dev-note">${note}</p>
+    <div class="db-scroll"><table class="db-table pt-grid${fam === "intraday" ? " pt-grid-heat" : ""}">
+      <thead><tr>${th("ticker", "Stock")}${cols.map((c) => th(c.key, c.label)).join("")}</tr></thead>
+      <tbody>${body}</tbody>
+    </table></div>
+    <p class="analysis-meta">Completed sessions only — history, not a forecast. Statistics per
+      stock live in each stock's detail view.</p>`;
+}
+
+$("ptView").addEventListener("click", (e) => {
+  if (e.target.id === "ptBack") { location.hash = ""; return; }
+  const famBtn = e.target.closest("button[data-pt-family]");
+  if (famBtn) {
+    ptState.family = famBtn.dataset.ptFamily;
+    ptState.sort = { key: "ticker", dir: 1 };
+    renderPtView();
+    return;
+  }
+  const th = e.target.closest("th[data-pt-sort]");
+  if (th) {
+    const k = th.dataset.ptSort;
+    ptState.sort = { key: k, dir: ptState.sort.key === k ? -ptState.sort.dir : (k === "ticker" ? 1 : -1) };
+    renderPtView();
+    return;
+  }
+  const tick = e.target.closest("td[data-goto-stock]");
+  if (tick) {
+    detailOpenedFromApp = true;
+    location.hash = "#/stock/" + tick.dataset.gotoStock;
+  }
+});
+$("ptView").addEventListener("change", (e) => {
+  if (e.target.id === "ptStat") {
+    ptState.stat = e.target.value;
+    renderPtView();
+  }
+});
+
 function handleRoute() {
   if (location.hash === "#/db") {
     if (detailModal.open) detailModal.close();
@@ -1563,6 +1897,11 @@ function handleRoute() {
   if (location.hash === "#/alerts") {
     if (detailModal.open) detailModal.close();
     enterAlView();
+    return;
+  }
+  if (location.hash === "#/patterns") {
+    if (detailModal.open) detailModal.close();
+    enterPtView();
     return;
   }
   exitDbView();

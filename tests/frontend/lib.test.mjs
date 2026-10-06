@@ -249,3 +249,65 @@ test("a paused rule reports paused regardless of its stored matches", () => {
                  unavailable: [] };
   assert.equal(lib.ruleState(rule), "paused");
 });
+
+/* ---------- pattern statistics ---------- */
+
+test("ruleWindowLabel names the window each kind of statistic covers", () => {
+  assert.equal(lib.ruleWindowLabel({ metric_key: "s:wd:mon:green_rate", period: "3M" }), "2Y history");
+  assert.equal(lib.ruleWindowLabel({ metric_key: "z:pc_close", period: "3M" }), "latest session");
+  assert.equal(lib.ruleWindowLabel({ metric_key: "m:green_days", period: "1M" }), "1M");
+});
+
+test("describeRule shows the pattern window instead of an ignored timeframe", () => {
+  const rule = { ticker: null, period: "3M", metric_key: "s:wd:today:green_rate", op: "gte", value: 60 };
+  assert.equal(lib.describeRule(rule, "Session's weekday — Green days"),
+               "Any stock · Session's weekday — Green days (2Y history) ≥ 60");
+});
+
+test("patternCellClass highlights only what clears the noise band", () => {
+  assert.equal(lib.patternCellClass({ value: 62, n: 99, z: 3.1, stands_out: true, thin: false }), "pt-out");
+  assert.equal(lib.patternCellClass({ value: 55, n: 99, z: 0.4, stands_out: false, thin: false }), "");
+  /* thin wins even over a stands-out flag: too few days to compare at all */
+  assert.equal(lib.patternCellClass({ value: 100, n: 1, z: 3.0, stands_out: true, thin: true }), "pt-thin");
+  assert.equal(lib.patternCellClass({ value: null, n: 0, z: null, stands_out: false, thin: true }), "pt-empty");
+  assert.equal(lib.patternCellClass(null), "pt-empty");
+});
+
+test("patternCellTitle states the sample size and how to read the value", () => {
+  assert.match(lib.patternCellTitle({ value: 62, n: 99, z: 3.1, stands_out: true, thin: false }),
+               /^99 days — differs .* \(z \+3\.1\)$/);
+  assert.equal(lib.patternCellTitle({ value: 55, n: 98, z: -0.4, stands_out: false, thin: false }),
+               "98 days — within normal variation of the other days");
+  assert.equal(lib.patternCellTitle({ value: 100, n: 1, z: null, stands_out: false, thin: true }),
+               "1 day — too few to compare");
+  assert.equal(lib.patternCellTitle({ value: 33, n: 139, z: null, stands_out: false, thin: false }),
+               "139 days");
+});
+
+test("fmtPatternValue prints rates with one decimal and averages with two", () => {
+  assert.equal(lib.fmtPatternValue(59.375, "rate"), "59.4%");
+  assert.equal(lib.fmtPatternValue(-0.8, "plain"), "-0.80%");
+  assert.equal(lib.fmtPatternValue(null, "rate"), "—");
+});
+
+test("bucketRange closes the last half hour at 16:00", () => {
+  const labels = ["09:30", "10:00", "15:30"];
+  assert.equal(lib.bucketRange(labels, 0), "09:30–10:00");
+  assert.equal(lib.bucketRange(labels, 2), "15:30–16:00");
+});
+
+test("heatAlpha scales to the grid's max and never passes the contrast cap", () => {
+  assert.equal(lib.heatAlpha(50, 50), 0.6);
+  assert.equal(lib.heatAlpha(25, 50), 0.3);
+  assert.equal(lib.heatAlpha(80, 50), 0.6, "clamped — a stray value can't wash out the text");
+  assert.equal(lib.heatAlpha(0, 50), 0);
+  assert.equal(lib.heatAlpha(10, 0), 0, "an all-zero grid stays unshaded");
+  assert.equal(lib.heatAlpha(null, 50), 0);
+});
+
+test("chanceExpected matches the normal tail at known thresholds", () => {
+  /* two-sided: |z| >= 1.96 -> 5%; |z| >= 2.6 -> 0.932% */
+  assert.ok(Math.abs(lib.chanceExpected(100, 1.96) - 5.0) < 0.01);
+  assert.ok(Math.abs(lib.chanceExpected(185, 2.6) - 1.725) < 0.01);
+  assert.equal(lib.chanceExpected(0, 2.6), 0);
+});
