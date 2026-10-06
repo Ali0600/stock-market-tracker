@@ -1,6 +1,7 @@
 """Stock Tracker — local market dashboard over yfinance."""
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 import time
@@ -17,8 +18,45 @@ from pydantic import BaseModel, Field
 
 from . import alerts, backtest, db, metrics, patterns, prices, vault
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+CODE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = CODE_DIR.parent / "static"
 TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,12}$")
+
+
+def _code_fingerprint() -> Optional[str]:
+    """Hash of the app's Python source as it is on disk right now.
+
+    The server runs without auto-reload while static/ is served live, so after
+    a pull the page can be newer than the routes answering it (a new page's
+    endpoint then 404s). Comparing this with the startup value lets the page
+    say "restart the server" instead of failing quietly.
+    """
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(CODE_DIR.glob("*.py")):
+            digest.update(path.name.encode())
+            digest.update(path.read_bytes())
+    except OSError:
+        return None     # a file vanished mid-read: the code is changing
+    return digest.hexdigest()
+
+
+STARTUP_FINGERPRINT = _code_fingerprint()
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """Static files the browser must revalidate before each use.
+
+    Without a Cache-Control header browsers cache heuristically, and a normal
+    reload refetches only the HTML — so a new index.html could run against an
+    old app.js. `no-cache` keeps the ETag round-trip (a cheap 304) but never
+    reuses a copy unchecked.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
 
 @asynccontextmanager
@@ -121,6 +159,7 @@ def overview(period: str = "3M", refresh: bool = False):
         "as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
         "stale": stale,
         "fetch_error": fetch_error,
+        "server_outdated": _code_fingerprint() != STARTUP_FINGERPRINT,
         "metric_defs": metrics.metric_defs(),
         "sectors": out_sectors,
     }
@@ -491,4 +530,4 @@ def remove_sector(sector_id: int):
 
 
 # Mounted last so /api/* routes take precedence; html=True serves index.html at /.
-app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+app.mount("/", RevalidatingStaticFiles(directory=STATIC_DIR, html=True), name="static")

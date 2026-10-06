@@ -4,6 +4,8 @@
 - `./run.sh` → http://127.0.0.1:8000 (FastAPI via uvicorn).
 - Venv is `venv/`, NOT `.venv/` (sandboxed tools can't read dot-directories here). The rename broke the console-script shebangs — always invoke `venv/bin/python -m uvicorn ...`, never `venv/bin/uvicorn`.
 - Needs Homebrew Python 3.12 (`/opt/homebrew/bin/python3.12`); system `python3` is 3.9 and too old for the pinned deps.
+- No `--reload`, while `static/` is served live: after a merge, a server started earlier serves the new page against old routes (a new page's endpoint 404s). `/api/overview` reports `server_outdated` when `app/*.py` on disk no longer hashes to what the process loaded, and the banner asks for a restart. Static files carry `Cache-Control: no-cache` (`RevalidatingStaticFiles`), so a reload can't pair a new `index.html` with a cached `app.js`. Keep both.
+- Before saying whether the app is running, check the port (`lsof -nP -iTCP:8000 -sTCP:LISTEN`): the owner often runs it from their own terminal window.
 
 ## Architecture map
 - `app/main.py` — API routes · `app/prices.py` — yfinance batch fetch, TTL cache (10 min daily / 5 min intraday), period windowing · `app/metrics.py` — "Things to Track" registry · `app/db.py` — SQLite at `data/tracker.db` (gitignored).

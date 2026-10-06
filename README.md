@@ -20,6 +20,9 @@ no API key, no cost.
 
 Requires Python 3.12 (Homebrew: `brew install python@3.12`).
 
+The server doesn't auto-reload. After pulling new code, restart `./run.sh`; until you do,
+the dashboard shows a banner saying the server is running older code than what's on disk.
+
 ## Tests
 
 ```bash

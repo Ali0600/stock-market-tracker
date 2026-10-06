@@ -111,9 +111,16 @@ function render() {
     month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   })}`;
   $("staleBadge").classList.toggle("hidden", !d.stale);
-  showBanner(d.fetch_error && d.stale
-    ? `Yahoo Finance fetch failed — showing cached data from ${asOf.toLocaleTimeString()}`
-    : d.fetch_error ? `Yahoo Finance fetch failed: ${d.fetch_error}` : "");
+  const notices = [];
+  if (d.server_outdated) {
+    notices.push("The server is running older code than what's on disk — restart it (./run.sh) to pick up the changes.");
+  }
+  if (d.fetch_error) {
+    notices.push(d.stale
+      ? `Yahoo Finance fetch failed — showing cached data from ${asOf.toLocaleTimeString()}`
+      : `Yahoo Finance fetch failed: ${d.fetch_error}`);
+  }
+  showBanner(notices.join(" · "));
 
   // The table also lists empty sectors (so they can be deleted); the empty
   // state only shows when nothing exists at all.

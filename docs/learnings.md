@@ -147,3 +147,21 @@ until 16:00 ET.
 
 **Takeaway:** treat the newest bar of a live market feed as provisional; derive "completed"
 from the clock and the exchange calendar, never from the bar's presence.
+
+## A page served live can be newer than the process answering it
+
+A server started without auto-reload keeps the routes it imported at startup, while a static
+file mount reads `index.html` and `app.js` from disk on every request. After a pull the browser
+gets the new page, which calls endpoints the old process never registered. Browsers add a
+second skew of their own: with no `Cache-Control` header they cache scripts heuristically
+(about a tenth of the file's age), and a normal reload refetches only the HTML.
+
+**Why it came up:** after the Patterns feature merged, its button did nothing. The server on
+port 8000 had been started before the merge, and `/api/patterns` answered 404 while the page
+offering it loaded fine. Restarting fixed it. To keep it from failing quietly again,
+`/api/overview` now compares a hash of `app/*.py` with the one taken at startup and the
+dashboard says when a restart is due, and static files are sent with `no-cache` so the browser
+revalidates each one (a 304 when unchanged).
+
+**Takeaway:** when code and assets are deployed on different clocks, have the server report
+which version it is running, and send `no-cache` on assets that aren't fingerprinted.
