@@ -10,13 +10,16 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
-from app import alerts, db, main, metrics, prices, vault
-from tests.conftest import make_daily
+from app import alerts, db, main, metrics, patterns, prices, vault
+from tests.conftest import make_daily, make_session_bars, weekly_pattern
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -26,6 +29,19 @@ RISING = make_daily([
     (100.0, 110.0, 95.0, 105.0),
     (105.0, 112.0, 99.0, 110.0),
 ])
+
+ET = ZoneInfo("America/New_York")
+MONDAY_NOON = datetime(2026, 5, 4, 12, 0, tzinfo=ET)
+TUESDAY_NOON = datetime(2026, 5, 5, 12, 0, tzinfo=ET)
+
+# Two years of history for the pattern rules: NVDA closes green on every one
+# of 16 Mondays, INTC's weekdays all behave alike, MSFT has no data.
+HISTORY = {"NVDA": weekly_pattern(16, True), "INTC": weekly_pattern(16, False)}
+
+# Ten completed sessions in which NVDA set its high in the first five minutes.
+APRIL_DAYS = [13, 14, 15, 16, 17, 20, 21, 22, 23, 24]
+INTRADAY_HISTORY = {"NVDA": pd.concat([
+    make_session_bars(f"2026-04-{d}", [110.0] + [100.0] * 77) for d in APRIL_DAYS])}
 
 # Two straight red days.
 FALLING = make_daily([
@@ -48,6 +64,11 @@ def client(tmp_path, monkeypatch):
                         lambda tickers, period, force=False: (
                             dict(frames), 1_700_000_000.0, False, None))
     monkeypatch.setattr(prices, "get_intraday", lambda tickers, force=False: {})
+    monkeypatch.setattr(prices, "get_history", lambda tickers, force=False: (
+        dict(HISTORY), 1_700_000_000.0, False, None))
+    monkeypatch.setattr(prices, "get_intraday_history", lambda tickers, force=False: (
+        dict(INTRADAY_HISTORY), 1_700_000_000.0, False, None))
+    monkeypatch.setattr(patterns, "now", lambda: MONDAY_NOON)
     monkeypatch.setattr(prices, "get_stats", lambda t, force=False: None)
     monkeypatch.setattr(prices, "get_news", lambda t, force=False: [])
     monkeypatch.setattr(vault, "stock_note", lambda t: None)
@@ -158,6 +179,88 @@ def test_each_period_is_fetched_once_however_many_rules_use_it(client, monkeypat
 
 def test_evaluate_with_no_rules_does_no_work(client):
     assert alerts.evaluate([]) == ([], False, None)
+
+
+# --------------------------------------------------------------------------
+# pattern statistics (s:)
+# --------------------------------------------------------------------------
+
+def test_a_pattern_rule_reports_matches_and_whether_they_stand_out(client):
+    """NVDA was green on 16 of 16 Mondays — far beyond its other days — so the
+    match says so; MSFT has no history and is unavailable, not "not met"."""
+    rule = make_rule(metric_key="s:wd:mon:green_rate", op="gte", value=90)
+    results, _, _ = alerts.evaluate([rule])
+    assert results[0]["matches"] == [{"ticker": "NVDA", "observed": 100.0, "stands_out": True}]
+    assert results[0]["unavailable"] == ["MSFT"]
+
+
+def test_a_matching_value_inside_normal_variation_says_so(client):
+    """INTC's Mondays are green half the time, like every other day — a rule
+    that matches it must not imply the value is unusual."""
+    rule = make_rule(ticker="INTC", metric_key="s:wd:mon:green_rate", op="gte", value=50)
+    results, _, _ = alerts.evaluate([rule])
+    assert results[0]["matches"] == [{"ticker": "INTC", "observed": 50.0, "stands_out": False}]
+
+
+def test_a_todays_weekday_rule_follows_the_session(client, monkeypatch):
+    rule = make_rule(ticker="NVDA", metric_key="s:wd:today:green_rate", op="gte", value=90)
+    results, _, _ = alerts.evaluate([rule])
+    assert [m["ticker"] for m in results[0]["matches"]] == ["NVDA"], "Monday: 100%"
+
+    monkeypatch.setattr(patterns, "now", lambda: TUESDAY_NOON)
+    results, _, _ = alerts.evaluate([rule])
+    assert results[0]["matches"] == [], "Tuesday: 50%, below the threshold"
+    assert results[0]["unavailable"] == [], "it computed fine — it just didn't hold"
+
+
+def spy(monkeypatch, name):
+    calls = []
+    real = getattr(prices, name)
+
+    def wrapper(*args, **kwargs):
+        calls.append(name)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(prices, name, wrapper)
+    return calls
+
+
+def test_pattern_rules_skip_the_period_fetch_and_the_intraday_history(client, monkeypatch):
+    """A weekday rule reads two-year daily bars once — no period window, no
+    five-minute history — however many pattern rules there are."""
+    daily = spy(monkeypatch, "get_daily")
+    history = spy(monkeypatch, "get_history")
+    intraday = spy(monkeypatch, "get_intraday_history")
+    alerts.evaluate([make_rule(id=1, metric_key="s:wd:mon:green_rate"),
+                     make_rule(id=2, metric_key="s:ft:after_red:next_green_rate")])
+    assert (len(daily), len(history), len(intraday)) == (0, 1, 0)
+
+
+def test_an_intraday_timing_rule_fetches_the_intraday_history_once(client, monkeypatch):
+    intraday = spy(monkeypatch, "get_intraday_history")
+    rule = make_rule(ticker=None, metric_key="s:intra:first30_high", op="gte", value=90)
+    results, _, _ = alerts.evaluate([rule, {**rule, "id": 2}])
+    assert len(intraday) == 1
+    # NVDA set its high in the first bar of all ten sessions; intraday timing
+    # has no comparison baseline, so it makes no stands-out claim either way.
+    assert results[0]["matches"] == [{"ticker": "NVDA", "observed": 100.0, "stands_out": None}]
+    assert results[0]["unavailable"] == ["INTC", "MSFT"]
+
+
+def test_creating_a_pattern_alert_over_http(client):
+    created = client.post("/api/alerts", json={
+        "name": "Monday green share", "metric_key": "s:wd:mon:green_rate",
+        "op": "gte", "value": 90})
+    assert created.status_code == 201
+    body = client.get("/api/alerts").json()
+    assert body["rules"][0]["matches"][0]["stands_out"] is True
+    assert body["triggered_count"] == 1
+
+
+def test_an_unknown_pattern_statistic_is_refused(client):
+    res = client.post("/api/alerts", json={
+        "name": "weekend", "metric_key": "s:wd:sat:green_rate", "op": "gte", "value": 50})
+    assert res.status_code == 422
 
 
 # --------------------------------------------------------------------------
