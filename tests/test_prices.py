@@ -414,3 +414,43 @@ def test_cache_status_reports_each_slot():
     assert status["daily:3mo"]["ttl_seconds"] == prices.DAILY_TTL
     assert status["intraday"]["ttl_seconds"] == prices.INTRADAY_TTL
     assert status["daily:3mo"]["tickers"] == len(KEY)
+
+
+# --------------------------------------------------------------------------
+# pattern histories — their own slots, windows and TTL
+# --------------------------------------------------------------------------
+
+def test_pattern_histories_request_their_windows_and_cache_separately(monkeypatch):
+    calls = []
+
+    def fake_download(tickers, **kwargs):
+        calls.append((kwargs.get("period"), kwargs.get("interval"), kwargs.get("prepost")))
+        return make_daily([(10, 11, 9, 10)] * 3)
+
+    monkeypatch.setattr(prices.yf, "download", fake_download)
+    frames, _, stale, error = prices.get_history(["AAA"])
+    prices.get_history(["AAA"])
+    prices.get_intraday_history(["AAA"])
+    prices.get_daily(["AAA"], "1Y")
+    assert (stale, error) == (False, None) and "AAA" in frames
+    # One fetch each: the 2y history, the 60-session five-minute history, and
+    # the live 1Y table — the history slots never answer for the table's.
+    assert calls == [("2y", "1d", None), ("60d", "5m", False), ("1y", "1d", None)]
+
+
+def test_pattern_slots_report_their_own_ttl():
+    prices._cached_fetch(prices.HISTORY_SLOT, KEY, prices.PATTERN_TTL, False, Counter())
+    prices._cached_fetch(prices.INTRADAY_HISTORY_SLOT, KEY, prices.PATTERN_TTL, False, Counter())
+    status = {s["slot"]: s for s in prices.cache_status()}
+    assert status["daily:2y"]["ttl_seconds"] == 3600
+    assert status["intraday:60d:5m"]["ttl_seconds"] == 3600
+
+
+def test_pattern_history_reports_a_fetch_error_instead_of_raising(monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(prices.yf, "download", boom)
+    for fetch in (prices.get_history, prices.get_intraday_history):
+        frames, _, stale, error = fetch(["AAA"])
+        assert frames == {} and stale is True and "RuntimeError" in error

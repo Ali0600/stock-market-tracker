@@ -35,6 +35,12 @@ INTRADAY_TTL = 300
 INFO_TTL = 3600
 NEWS_TTL = 900
 
+# Pattern statistics read long histories that only change when a session
+# completes, so they get their own slots and a longer TTL than the live table.
+PATTERN_TTL = 3600
+HISTORY_SLOT = "daily:2y"
+INTRADAY_HISTORY_SLOT = "intraday:60d:5m"
+
 # _state_lock guards the two dicts below and is only ever held for dict
 # access — never across a network fetch. Each slot then gets its own lock so a
 # slow fetch in one slot can't stall cache reads (or fetches) in another.
@@ -161,6 +167,37 @@ def get_intraday(tickers: list[str], force: bool = False) -> dict[str, pd.DataFr
         return {}
 
 
+def _history(slot: str, tickers: list[str], force: bool, **download: object
+             ) -> tuple[dict[str, pd.DataFrame], float, bool, Optional[str]]:
+    key = tuple(sorted(set(tickers)))
+
+    def fetch() -> dict:
+        df = yf.download(list(key), group_by="ticker", auto_adjust=False,
+                         threads=True, progress=False, **download)
+        return _split(df, key)
+
+    try:
+        frames, fetched_at, stale = _cached_fetch(slot, key, PATTERN_TTL, force, fetch)
+        return frames, fetched_at, stale, None
+    except Exception as exc:
+        return {}, time.time(), True, f"Price fetch failed ({type(exc).__name__})"
+
+
+def get_history(tickers: list[str], force: bool = False
+                ) -> tuple[dict[str, pd.DataFrame], float, bool, Optional[str]]:
+    """Two years of daily bars for the pattern statistics.
+    Returns (frames, fetched_at, stale, fetch_error) like get_daily."""
+    return _history(HISTORY_SLOT, tickers, force, period="2y", interval="1d")
+
+
+def get_intraday_history(tickers: list[str], force: bool = False
+                         ) -> tuple[dict[str, pd.DataFrame], float, bool, Optional[str]]:
+    """Five-minute bars for the last 60 sessions — the most intraday history
+    Yahoo serves ("intraday data cannot extend last 60 days")."""
+    return _history(INTRADAY_HISTORY_SLOT, tickers, force,
+                    period="60d", interval="5m", prepost=False)
+
+
 def _with_live_bar(df: pd.DataFrame, intraday: Optional[pd.DataFrame]) -> pd.DataFrame:
     """Append a synthetic daily bar built from the latest intraday session when
     the daily feed doesn't have a completed bar for it yet (market currently
@@ -268,6 +305,8 @@ def cache_status() -> list[dict]:
                 ttl = NEWS_TTL
             elif slot == "intraday":
                 ttl = INTRADAY_TTL
+            elif slot in (HISTORY_SLOT, INTRADAY_HISTORY_SLOT):
+                ttl = PATTERN_TTL
             else:
                 ttl = DAILY_TTL
             out.append({

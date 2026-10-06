@@ -11,13 +11,15 @@ machinery unchanged:
   "m:<metric>"  — a Things-to-Track / range-stat value (metrics.compute_all)
   "<core>"      — a core table column (prices.compute_core), e.g. "pct"
   "z:<metric>"  — a σ Today z-score (metrics.today_vs_typical)
+  "s:<pattern>" — a pattern statistic over two years of completed sessions
+                  (patterns.flatten); the rule's period does not apply
 """
 from __future__ import annotations
 
 import logging
 from typing import Optional
 
-from . import db, metrics, prices
+from . import db, metrics, patterns, prices
 
 log = logging.getLogger("uvicorn.error")
 
@@ -52,6 +54,8 @@ def stat_defs() -> list[dict]:
              for m in metrics.metric_defs() if m["fmt"] in NUMERIC_FMTS]
     defs += [{"key": key, "label": label, "group": "Today vs typical"}
              for key, label in Z_LABELS.items()]
+    defs += [{"key": d["key"], "label": d["label"], "group": d["group"]}
+             for d in patterns.alert_defs()]
     return defs
 
 
@@ -59,8 +63,12 @@ def allowed_keys() -> set[str]:
     return {d["key"] for d in stat_defs()}
 
 
-def _observed(key: str, core: dict, extras: dict, z_scores: Optional[dict]) -> Optional[float]:
+def _observed(key: str, core: dict, extras: dict, z_scores: Optional[dict],
+              s_values: Optional[dict] = None) -> Optional[float]:
     """The rule's statistic for one stock, or None when it can't be computed."""
+    if key.startswith("s:"):
+        value = (s_values or {}).get(key)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
     if key.startswith("z:"):
         if not z_scores:
             return None
@@ -92,6 +100,11 @@ def evaluate(rules: list[dict], force: bool = False) -> tuple[list[dict], bool, 
     frames_by_period: dict[str, dict] = {}
     computed: dict[tuple[str, str], tuple[dict, dict]] = {}   # (period, ticker) -> (core, extras)
     z_by_ticker: dict[str, Optional[dict]] = {}
+    s_by_ticker: dict[str, tuple[dict, dict]] = {}
+    history: dict[str, dict] = {}
+    # The 60-session five-minute history is the heaviest fetch here; only pay
+    # for it when a rule actually reads an intraday-timing statistic.
+    needs_intraday_history = any(r["metric_key"].startswith("s:intra:") for r in rules)
 
     intraday = prices.get_intraday(tickers, force=force) if tickers else {}
 
@@ -137,21 +150,57 @@ def evaluate(rules: list[dict], force: bool = False) -> tuple[list[dict], bool, 
                     z_by_ticker[ticker] = None
         return z_by_ticker[ticker]
 
+    def history_frames(slot: str) -> dict:
+        nonlocal stale_any, first_error
+        if slot not in history:
+            fetch = (prices.get_intraday_history if slot == "intraday"
+                     else prices.get_history)
+            frames, _, stale, error = fetch(tickers, force=force)
+            history[slot] = frames
+            stale_any = stale_any or stale
+            if error and first_error is None:
+                first_error = error
+        return history[slot]
+
+    def s_for(ticker: str) -> tuple[dict, dict]:
+        """(values, stands_out) for every pattern statistic of one stock."""
+        if ticker not in s_by_ticker:
+            daily = history_frames("daily").get(ticker)
+            bars = history_frames("intraday").get(ticker) if needs_intraday_history else None
+            try:
+                prof = patterns.profile(daily, bars, patterns.now())
+            except Exception:
+                log.exception("alert pattern stats failed for %s", ticker)
+                prof = None
+            s_by_ticker[ticker] = patterns.flatten(prof)
+        return s_by_ticker[ticker]
+
     for rule in rules:
+        key = rule["metric_key"]
         targets = [rule["ticker"]] if rule["ticker"] else tickers
         matches, unavailable = [], []
         for ticker in targets:
             if ticker not in tickers:
                 unavailable.append(ticker)   # rule outlived the stock
                 continue
-            stats = stats_for(rule["period"], ticker)
-            z_scores = z_for(ticker) if rule["metric_key"].startswith("z:") else None
-            core, extras = stats if stats else ({}, {})
-            observed = _observed(rule["metric_key"], core, extras, z_scores)
+            core, extras, z_scores, s_values, s_flags = {}, {}, None, None, {}
+            if key.startswith("s:"):
+                s_values, s_flags = s_for(ticker)
+            elif key.startswith("z:"):
+                z_scores = z_for(ticker)
+            else:
+                stats = stats_for(rule["period"], ticker)
+                core, extras = stats if stats else ({}, {})
+            observed = _observed(key, core, extras, z_scores, s_values)
             if observed is None:
                 unavailable.append(ticker)
             elif _holds(observed, rule["op"], rule["value"]):
-                matches.append({"ticker": ticker, "observed": round(float(observed), 2)})
+                match = {"ticker": ticker, "observed": round(float(observed), 2)}
+                if key.startswith("s:"):
+                    # Whether this stock's value differs from its other days by
+                    # more than normal variation (None: no comparison exists).
+                    match["stands_out"] = s_flags.get(key)
+                matches.append(match)
         results.append({**rule, "matches": matches, "unavailable": unavailable})
 
     return results, stale_any, first_error

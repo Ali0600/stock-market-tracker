@@ -165,11 +165,21 @@ const OP_SYMBOL = { gte: "≥", lte: "≤" };
 /* Plain-language summary of a rule: what is being watched, over what window,
    and the threshold the owner set. Purely descriptive — it restates the
    condition, never what a met condition might mean. */
+/* The window a rule's statistic covers. Pattern (s:) statistics always use
+   two years of completed sessions and σ Today (z:) statistics the latest
+   session, so the rule's own timeframe applies to neither. */
+function ruleWindowLabel(rule) {
+  const key = rule.metric_key || "";
+  if (key.startsWith("s:")) return "2Y history";
+  if (key.startsWith("z:")) return "latest session";
+  return rule.period;
+}
+
 function describeRule(rule, statLabel) {
   const who = rule.ticker || "Any stock";
   const label = statLabel || rule.metric_key;
   const op = OP_SYMBOL[rule.op] || rule.op;
-  return `${who} · ${label} (${rule.period}) ${op} ${rule.value}`;
+  return `${who} · ${label} (${ruleWindowLabel(rule)}) ${op} ${rule.value}`;
 }
 
 /* Default name for a new rule, so the owner gets a sensible label without
@@ -191,6 +201,58 @@ function ruleState(rule) {
   return "unmet";
 }
 
+/* ---------- pattern statistics ---------- */
+
+/* A cell is highlighted only when it clears the noise band, and dimmed when
+   it rests on too few days to compare at all. */
+function patternCellClass(cell) {
+  if (!cell || cell.value == null) return "pt-empty";
+  if (cell.thin) return "pt-thin";
+  return cell.stands_out ? "pt-out" : "";
+}
+
+function patternCellTitle(cell) {
+  if (!cell || cell.value == null) return "No days in this group";
+  const days = `${cell.n} day${cell.n === 1 ? "" : "s"}`;
+  if (cell.thin) return `${days} — too few to compare`;
+  if (cell.stands_out) {
+    const z = `${cell.z > 0 ? "+" : ""}${cell.z}`;
+    return `${days} — differs from this stock's other days by more than normal variation (z ${z})`;
+  }
+  if (cell.z == null) return days;
+  return `${days} — within normal variation of the other days`;
+}
+
+function fmtPatternValue(value, fmt) {
+  if (value == null || !isFinite(value)) return "—";
+  if (fmt === "rate") return `${value.toFixed(1)}%`;
+  return `${value.toFixed(2)}%`;
+}
+
+/* "09:30–10:00" for bucket i; the last bucket runs to the 16:00 close. */
+function bucketRange(labels, i) {
+  return `${labels[i]}–${i + 1 < labels.length ? labels[i + 1] : "16:00"}`;
+}
+
+/* Background strength of a sequential heat cell. Capped at 0.6: measured,
+   primary text keeps 5.3:1 contrast on the darkest cell (dim text would drop
+   to 2.1:1, so heat cells never use it). */
+function heatAlpha(value, max) {
+  if (value == null || !(max > 0)) return 0;
+  return Math.round(Math.min(1, Math.max(0, value / max)) * 0.6 * 100) / 100;
+}
+
+/* How many cells pure chance would flag at a two-sided |z| threshold — the
+   number to read the real count against. Normal tail via Abramowitz-Stegun
+   7.1.26 (error < 1.5e-7). */
+function chanceExpected(tested, zThreshold) {
+  const x = zThreshold / Math.SQRT2;
+  const t = 1 / (1 + 0.3275911 * x);
+  const erfc = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+    + t * (-1.453152027 + t * 1.061405429)))) * Math.exp(-x * x);
+  return tested * erfc;
+}
+
 /* Node test harness only — browsers ignore this. */
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -198,6 +260,8 @@ if (typeof module !== "undefined" && module.exports) {
     loadCols, loadFilters, loadCollapsed,
     FILTERABLE_TYPES, parseNumInput, cellValue, applyFilters,
     compareRows, sortRows,
-    OP_SYMBOL, describeRule, composeRuleName, ruleState,
+    OP_SYMBOL, describeRule, composeRuleName, ruleState, ruleWindowLabel,
+    patternCellClass, patternCellTitle, fmtPatternValue, bucketRange, heatAlpha,
+    chanceExpected,
   };
 }

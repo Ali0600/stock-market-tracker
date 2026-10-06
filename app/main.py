@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from pandas import notna as pd_notna
 from pydantic import BaseModel, Field
 
-from . import alerts, backtest, db, metrics, prices, vault
+from . import alerts, backtest, db, metrics, patterns, prices, vault
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 TICKER_RE = re.compile(r"^[A-Z0-9.\-]{1,12}$")
@@ -352,6 +352,64 @@ def deviations():
                              "sector": sec["name"], **dev})
     return {"as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
             "stale": stale, "fetch_error": fetch_error, "stocks": rows}
+
+
+def _pattern_inputs(force: bool) -> tuple[dict, dict, float, bool, Optional[str]]:
+    """Two years of daily bars plus 60 sessions of five-minute bars for every
+    tracked stock — one batched, cached fetch each, shared by both endpoints."""
+    tickers = db.all_tickers()
+    daily, fetched_at, stale, error = prices.get_history(tickers, force=force)
+    bars, _, bars_stale, bars_error = prices.get_intraday_history(tickers, force=force)
+    return daily, bars, fetched_at, stale or bars_stale, error or bars_error
+
+
+@app.get("/api/stocks/{ticker}/patterns")
+def stock_patterns(ticker: str, refresh: bool = False):
+    """Weekday, follow-through, gap, turn-of-month and intraday-timing
+    statistics over completed sessions. Historical frequencies only."""
+    symbol = ticker.strip().upper()
+    if not db.ticker_exists(symbol):
+        raise HTTPException(404, f"{symbol} is not tracked")
+    daily, bars, fetched_at, stale, fetch_error = _pattern_inputs(refresh)
+    at = patterns.now()
+    prof = patterns.profile(daily.get(symbol), bars.get(symbol), at)
+    return {
+        "ticker": symbol,
+        "lookback": patterns.LOOKBACK,
+        "as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
+        "stale": stale,
+        "fetch_error": fetch_error,
+        "target_session": str(patterns.target_session(at)),
+        "profile": prof,
+        "error": None if prof else "Not enough price history",
+    }
+
+
+@app.get("/api/patterns")
+def portfolio_patterns(refresh: bool = False):
+    """The same statistics for every tracked stock, for the Patterns page.
+    A stock without enough history is listed with an error, never dropped."""
+    daily, bars, fetched_at, stale, fetch_error = _pattern_inputs(refresh)
+    at = patterns.now()
+    stocks = []
+    for sec in db.sectors_with_stocks():
+        for stock in sec["stocks"]:
+            prof = patterns.profile(daily.get(stock["ticker"]), bars.get(stock["ticker"]), at)
+            stocks.append({
+                "ticker": stock["ticker"], "name": stock["name"], "sector": sec["name"],
+                "profile": prof,
+                "error": None if prof else "Not enough price history",
+            })
+    return {
+        "lookback": patterns.LOOKBACK,
+        "as_of": datetime.fromtimestamp(fetched_at).isoformat(timespec="seconds"),
+        "stale": stale,
+        "fetch_error": fetch_error,
+        "target_session": str(patterns.target_session(at)),
+        "min_n": patterns.MIN_N,
+        "stands_out_z": patterns.STANDS_OUT_Z,
+        "stocks": stocks,
+    }
 
 
 @app.get("/api/alerts")

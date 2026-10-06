@@ -5,17 +5,22 @@ network, no touching the real portfolio.
 """
 from __future__ import annotations
 
+from datetime import datetime
+
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, main, prices, vault
-from tests.conftest import make_daily
+from app import db, main, patterns, prices, vault
+from tests.conftest import make_daily, weekly_pattern
 
 PRICED = make_daily([
     (100.0, 100.0, 100.0, 100.0),
     (100.0, 110.0, 95.0, 105.0),
     (105.0, 112.0, 99.0, 110.0),
 ])
+
+HISTORY = weekly_pattern(16, True)
+TUESDAY_NOON = datetime(2026, 5, 5, 12, 0, tzinfo=patterns.MARKET_TZ)
 
 
 @pytest.fixture
@@ -30,6 +35,12 @@ def client(tmp_path, monkeypatch):
                         lambda tickers, period, force=False: (
                             {t: PRICED for t in tickers}, 1_700_000_000.0, False, None))
     monkeypatch.setattr(prices, "get_intraday", lambda tickers, force=False: {})
+    monkeypatch.setattr(prices, "get_history",
+                        lambda tickers, force=False: (
+                            {t: HISTORY for t in tickers}, 1_700_000_000.0, False, None))
+    monkeypatch.setattr(prices, "get_intraday_history",
+                        lambda tickers, force=False: ({}, 1_700_000_000.0, False, None))
+    monkeypatch.setattr(patterns, "now", lambda: TUESDAY_NOON)
     monkeypatch.setattr(prices, "get_stats", lambda t, force=False: None)
     monkeypatch.setattr(prices, "get_news", lambda t, force=False: [])
     monkeypatch.setattr(vault, "stock_note", lambda t: None)
@@ -308,3 +319,46 @@ def test_the_spa_and_its_assets_are_served(client):
     assert client.get("/").status_code == 200
     assert client.get("/lib.js").status_code == 200
     assert client.get("/app.js").status_code == 200
+
+
+# --------------------------------------------------------------------------
+# /api/stocks/{ticker}/patterns and /api/patterns
+# --------------------------------------------------------------------------
+
+def test_stock_patterns_returns_every_family(client):
+    body = client.get("/api/stocks/nvda/patterns").json()
+    assert body["ticker"] == "NVDA"
+    assert body["lookback"] == "2Y"
+    assert body["target_session"] == "2026-05-05"
+    prof = body["profile"]
+    assert {"weekday", "follow_through", "gaps", "turn_of_month", "intraday"} <= set(prof)
+    mon = next(r for r in prof["weekday"]["rows"] if r["key"] == "mon")
+    assert mon["cells"]["green_rate"]["value"] == 100.0
+    assert prof["intraday"] is None, "no five-minute history: the family is absent, not invented"
+
+
+def test_stock_patterns_404_for_an_untracked_ticker(client):
+    assert client.get("/api/stocks/ZZZZ/patterns").status_code == 404
+
+
+def test_portfolio_patterns_lists_every_tracked_stock(client, monkeypatch):
+    """A stock without history is reported with an error — never dropped, or
+    the grid would quietly shrink."""
+    monkeypatch.setattr(prices, "get_history", lambda tickers, force=False: (
+        {"NVDA": HISTORY, "INTC": HISTORY}, 1_700_000_000.0, False, None))
+    body = client.get("/api/patterns").json()
+    by_ticker = {s["ticker"]: s for s in body["stocks"]}
+    assert set(by_ticker) == {"NVDA", "INTC", "MSFT"}
+    assert by_ticker["MSFT"]["profile"] is None
+    assert by_ticker["MSFT"]["error"]
+    assert by_ticker["NVDA"]["sector"] == "Semis"
+    assert (body["min_n"], body["stands_out_z"]) == (patterns.MIN_N, patterns.STANDS_OUT_Z)
+
+
+def test_pattern_fetch_failures_surface_as_stale(client, monkeypatch):
+    monkeypatch.setattr(prices, "get_history", lambda tickers, force=False: (
+        {}, 1_700_000_000.0, True, "Price fetch failed (RuntimeError)"))
+    body = client.get("/api/patterns").json()
+    assert body["stale"] is True
+    assert body["fetch_error"] == "Price fetch failed (RuntimeError)"
+    assert all(s["profile"] is None for s in body["stocks"])
