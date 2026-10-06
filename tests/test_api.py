@@ -107,6 +107,40 @@ def test_overview_rejects_an_unknown_period(client):
     assert "period must be one of" in res.json()["detail"]
 
 
+def test_overview_reports_when_the_code_on_disk_changed_since_startup(
+        client, tmp_path, monkeypatch):
+    def outdated():
+        return client.get("/api/overview").json()["server_outdated"]
+
+    assert outdated() is False                 # the real app/, unchanged since import
+
+    code = tmp_path / "code"
+    code.mkdir()
+    (code / "a.py").write_text("x = 1\n")
+    monkeypatch.setattr(main, "CODE_DIR", code)
+    monkeypatch.setattr(main, "STARTUP_FINGERPRINT", main._code_fingerprint())
+    assert outdated() is False
+
+    (code / "a.py").write_text("x = 2\n")      # a pulled change the server never loaded
+    assert outdated() is True
+    (code / "a.py").write_text("x = 1\n")      # same bytes again: content, not mtime
+    assert outdated() is False
+    (code / "b.py").write_text("")             # a new module counts too
+    assert outdated() is True
+
+
+def test_static_assets_must_be_revalidated_before_reuse(client):
+    # A heuristically cached app.js would run against a newer index.html.
+    for path in ("/", "/app.js", "/lib.js", "/styles.css"):
+        res = client.get(path)
+        assert res.status_code == 200
+        assert res.headers["cache-control"] == "no-cache"
+    etag = client.get("/app.js").headers["etag"]
+    res = client.get("/app.js", headers={"If-None-Match": etag})
+    assert res.status_code == 304              # revalidating stays a cheap round-trip
+    assert res.headers["cache-control"] == "no-cache"
+
+
 @pytest.mark.parametrize("period", ["1D", "5D", "1M", "3M", "YTD", "1Y"])
 def test_every_supported_period_renders(client, period):
     assert client.get(f"/api/overview?period={period}").status_code == 200
