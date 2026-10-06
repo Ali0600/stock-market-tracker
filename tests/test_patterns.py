@@ -194,16 +194,20 @@ GAPS = make_daily([
     (102.5, 103.0, 99.0, 100.0),     # +0.49%: not a gap
     (99.0, 99.5, 97.0, 98.0),        # gap down exactly 1%: high 99.5 < 100 unfilled; 98 < 99 continued
     (99.96, 100.0, 98.5, 99.0),      # gap up 2%: low 98.5 > 98 unfilled; 99 < 99.96 not continued
+    (100.0, 101.0, 98.0, 100.5),     # gap up 1.01%: low 98 <= 99 filled; 100.5 > 100 continued
 ])
+# Three gap-ups on purpose: with two of opposite outcome, a flipped comparison
+# just swaps which one counts and both rates stay 50% — blind to the bug.
 
 
 def test_gap_fill_and_continuation_by_hand():
     rows = rows_by_key(patterns.gap_behavior(frame_of(GAPS)))
     up, down = rows["up"], rows["down"]
-    assert up["n"] == 2, "a gap of exactly 1% counts; 0.49% does not"
-    assert up["cells"]["fill_rate"]["value"] == 50.0
-    assert up["cells"]["continue_rate"]["value"] == 50.0
-    assert up["cells"]["avg_gap"]["value"] == pytest.approx(1.5, abs=0.01)
+    assert up["n"] == 3, "a gap of exactly 1% counts; 0.49% does not"
+    assert up["cells"]["fill_rate"]["value"] == pytest.approx(66.67, abs=0.01)
+    assert up["cells"]["continue_rate"]["value"] == pytest.approx(66.67, abs=0.01)
+    # (1.0 + 2.0 + 1.0101) / 3
+    assert up["cells"]["avg_gap"]["value"] == pytest.approx(1.34, abs=0.005)
     assert down["n"] == 1
     assert down["cells"]["fill_rate"]["value"] == 0.0
     assert down["cells"]["continue_rate"]["value"] == 100.0
@@ -213,7 +217,7 @@ def test_gap_counts_agree_with_the_gap_frequency_column():
     """Two code paths define a gap; the column on the dashboard and this
     family must never disagree about which days were gaps."""
     rows = rows_by_key(patterns.gap_behavior(frame_of(GAPS)))
-    assert rows["up"]["n"] + rows["down"]["n"] == metrics.gap_frequency(GAPS, None) == 3
+    assert rows["up"]["n"] + rows["down"]["n"] == metrics.gap_frequency(GAPS, None) == 4
 
 
 # --------------------------------------------------------------------------
