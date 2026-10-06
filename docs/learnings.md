@@ -104,3 +104,46 @@ confirmed the code works on what CI will get, not just on what happens to be ins
 
 **Takeaway:** after changing dependency floors, build a clean environment and run the suite in
 it. Anything that clones fresh — CI, a new machine, another contributor — is the real test.
+
+## A "best" bucket always exists — read it against chance
+
+Split any data into buckets and one of them comes out on top, even when nothing real
+distinguishes them. With many buckets compared at once (5 weekdays × 37 stocks), some will
+clear a "significant-looking" bar by luck alone — the multiple-comparisons problem.
+
+**Why it came up:** asked which weekday has the most green closes, the portfolio answered
+— and 10 of 185 weekday cells sat beyond two standard errors over one year, against ~8 that
+pure coin flips would produce. Over two years the count fell to 6: more data shrank the
+"patterns", exactly as noise does. The Patterns page now compares each bucket with the rest
+of the days, outlines only cells past a Bonferroni-style threshold (|z| ≥ 2.6 across five
+weekdays), and prints "N stand out; chance alone would flag about M" next to the grid.
+
+**Takeaway:** before reporting a winner among buckets, count how many winners chance would
+hand you — and show that number beside the result.
+
+## A fixture whose outcomes cancel can't see a flipped comparison
+
+A rate is a count over a total. If a fixture's samples split evenly between the two outcomes,
+inverting the test that decides the outcome swaps which samples count — and leaves the rate
+unchanged.
+
+**Why it came up:** the gap fixture had two gap-ups, one that filled and one that didn't. Flipping
+`low <= prev_close` to `>=` made the filled one unfilled and vice versa: still 50%, and the
+sabotage survived. A third gap-up made the correct answer 66.67% and the flipped one 33.33%.
+
+**Takeaway:** for any rate or ratio, give the fixture an uneven split, so that flipping the
+outcome test changes the number it produces.
+
+## A live feed serves the session that hasn't finished
+
+During market hours, Yahoo's daily download already contains today's bar, built from the
+session so far, and the five-minute feed contains its bars up to now. Both look like ordinary
+completed data.
+
+**Why it came up:** a probe at 15:09 ET returned a daily bar dated today and a session with 68
+of its 78 five-minute bars. Counted as history, that half day would score as a full one (a
+morning dip filed as "a red Tuesday"). The pattern statistics drop any session dated today
+until 16:00 ET.
+
+**Takeaway:** treat the newest bar of a live market feed as provisional; derive "completed"
+from the clock and the exchange calendar, never from the bar's presence.
